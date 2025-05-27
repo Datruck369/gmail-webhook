@@ -1,30 +1,19 @@
+
 from flask import Flask, request
 import base64
-import json
-import requests
-import csv
-import pickle
 import os
+import pickle
+import re
+import requests
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
-from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
-from bs4 import BeautifulSoup
-import re
+from geopy.geocoders import Nominatim
+import csv
 
 app = Flask(__name__)
 
-# === CONFIG ===
-TELEGRAM_BOT_TOKEN = "8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20"  # ⬅️ Replace this
-GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-RADIUS_MILES = 150
-geolocator = Nominatim(user_agent="zip-radius-filter")
-
-# === HELPERS ===
-
-def load_drivers():
-    with open("drivers.csv", newline="") as f:
-        return list(csv.DictReader(f))
+TELEGRAM_BOT_TOKEN = "8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20"
 
 def get_gmail_service():
     creds = None
@@ -35,167 +24,95 @@ def get_gmail_service():
         creds.refresh(Request())
     return build("gmail", "v1", credentials=creds)
 
-def extract_text_from_parts(parts):
-    for part in parts:
-        mime_type = part.get("mimeType", "")
-        body_data = part.get("body", {}).get("data", "")
+def get_latest_email(service):
+    try:
+        results = service.users().messages().list(userId='me', maxResults=1).execute()
+        messages = results.get("messages", [])
+        if not messages:
+            print("⚠️ No messages found.")
+            return None
+        msg = service.users().messages().get(userId='me', id=messages[0]['id'], format='full').execute()
+        parts = msg['payload'].get('parts', [])
+        for part in parts:
+            data = part['body'].get('data')
+            if data:
+                return base64.urlsafe_b64decode(data).decode("utf-8")
+        print("⚠️ No data part found.")
+        return None
+    except Exception as e:
+        print("❌ Error fetching latest email:", e)
+        return None
 
-        if "multipart" in mime_type and "parts" in part:
-            result = extract_text_from_parts(part["parts"])
-            if result:
-                return result
+def extract_zip(text):
+    match = re.search(r"\b\d{5}\b", text)
+    return match.group() if match else None
 
-        if mime_type == "text/html" and body_data:
-            raw_html = base64.urlsafe_b64decode(body_data).decode("utf-8", errors="ignore")
-            soup = BeautifulSoup(raw_html, "html.parser")
-            return soup.get_text()
-        elif mime_type == "text/plain" and body_data:
-            return base64.urlsafe_b64decode(body_data).decode("utf-8", errors="ignore")
-
+def get_coords(zip_code):
+    geolocator = Nominatim(user_agent="zip-locator")
+    location = geolocator.geocode(f"{zip_code}, USA")
+    if location:
+        return (location.latitude, location.longitude)
     return None
 
-def extract_zip_from_body(body):
-    zip_codes = re.findall(r"\d{5}", body)
-    print(f"\U0001f9e0 ZIPs found in email: {zip_codes}")
+def get_nearby_drivers(pickup_zip):
+    pickup_coords = get_coords(pickup_zip)
+    if not pickup_coords:
+        return []
+    nearby = []
+    with open("drivers.csv", newline='') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            driver_zip = row["zip"]
+            driver_coords = get_coords(driver_zip)
+            if driver_coords:
+                distance = geodesic(pickup_coords, driver_coords).miles
+                if distance <= 150:
+                    nearby.append({
+                        "id": row["id"],
+                        "truck": row["truck"],
+                        "zip": driver_zip,
+                        "distance": round(distance)
+                    })
+    return nearby
 
-    pickup_zip = None
-    for z in zip_codes:
-        try:
-            location = geolocator.geocode(z)
-            if location:
-                pickup_zip = z
-                print(f"✅ Using ZIP: {pickup_zip}")
-                break
-        except:
-            continue
-
-    if not pickup_zip and zip_codes:
-        pickup_zip = zip_codes[0]
-        print(f"⚠️ Using fallback ZIP: {pickup_zip}")
-
-    return pickup_zip
-
-def extract_zip_from_body(body):
-    zip_codes = re.findall(r"\d{5}", body)
-    print(f"🧠 ZIPs found in email: {zip_codes}")
-
-    pickup_zip = None
-    delivery_zip = None
-
-    # Correct regex (removed double backslashes)
-    pickup_match = re.search(r'(?i)Pick[- ]?Up[^\n]*?(\b\d{5}\b)', body)
-    delivery_match = re.search(r'(?i)Deliver[y]?[^\n]*?(\b\d{5}\b)', body)
-
-    if pickup_match:
-        pickup_zip = pickup_match.group(1)
-        print(f"📍 Found pickup ZIP: {pickup_zip}")
-        return pickup_zip
-
-    if delivery_match:
-        delivery_zip = delivery_match.group(1)
-        print(f"📍 Found delivery ZIP: {delivery_zip}")
-        return delivery_zip
-
-    # Fallback to any ZIP that geolocates
-    for z in zip_codes:
-        try:
-            location = geolocator.geocode(z)
-            if location:
-                print(f"⚠️ Using fallback ZIP: {z}")
-                return z
-        except:
-            continue
-
-    print("⚠️ No valid ZIP could be located.")
-    return None
-
-
-
-def send_telegram(chat_id, message):
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": message}
-    )
-
-# === MAIN GMAIL WEBHOOK ===
+def send_to_telegram(chat_id, message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": chat_id, "text": message}
+    response = requests.post(url, data=data)
+    return response.ok
 
 @app.route("/gmail-notify", methods=["POST"])
 def gmail_notify():
     print("✅ Gmail notification received!")
 
     try:
-        data = request.json
-        message_data = data["message"]["data"]
-        decoded = base64.urlsafe_b64decode(message_data).decode("utf-8")
-        message_json = json.loads(decoded)
-        print(f"📜 History ID: {message_json.get('historyId')}")
+        data = request.get_json()
+        print("📜 Raw push payload:", data)
 
-        # Get latest email
+        history_id = data.get("historyId")
+        print("📜 History ID:", history_id)
+
         service = get_gmail_service()
-        messages = service.users().messages().list(userId="me", labelIds=["INBOX"], maxResults=1).execute().get("messages", [])
-        if not messages:
-            return "No new messages", 200
+        message = get_latest_email(service)
 
-        msg_id = messages[0]["id"]
-        msg = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+        print("📩 FULL EMAIL BODY ↓↓↓↓↓↓↓")
+        print(message)
 
-        snippet = msg.get("snippet", "")
-        payload = msg.get("payload", {})
-        parts = payload.get("parts", [])
-        body = ""
+        pickup_zip = extract_zip(message)
+        print("📍 Found pickup ZIP:", pickup_zip)
 
-        if parts:
-            body = extract_text_from_parts(parts)
-        elif "body" in payload and "data" in payload["body"]:
-            raw_html = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="ignore")
-            soup = BeautifulSoup(raw_html, "html.parser")
-            body = soup.get_text()
-
-        email_content = body if body else snippet
-
-        print("\n📩 FULL EMAIL BODY ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓")
-        print(email_content)
-        print("↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑\n")
-
-        pickup_zip = extract_zip_from_body(email_content)
-        if not pickup_zip:
-            print("⚠️ No ZIP found in full email content.")
-            return "", 200
-
-        pickup, delivery = extract_pickup_delivery(email_content)
-
-        pickup_coords = geolocator.geocode(pickup_zip)
-        if not pickup_coords:
-            print(f"⚠️ Could not geolocate ZIP: {pickup_zip}")
-            return "", 200
-
-        pickup_coords = (pickup_coords.latitude, pickup_coords.longitude)
-        drivers = load_drivers()
+        drivers = get_nearby_drivers(pickup_zip)
+        print(f"🚛 Found {len(drivers)} drivers near {pickup_zip}")
 
         for driver in drivers:
-            driver_zip = driver["zip"]
-            driver_coords = geolocator.geocode(driver_zip)
-            if not driver_coords:
-                continue
+            text = f"🚚 New Load for {driver['truck']}:
 
-            driver_coords = (driver_coords.latitude, driver_coords.longitude)
-            distance = geodesic(pickup_coords, driver_coords).miles
-            print(f"📏 Distance from {pickup_zip} to {driver_zip}: {round(distance)} mi")
-
-            if distance <= RADIUS_MILES:
-                message = (
-                    f"🚚 New Load for {driver['driver_name']}:\n\n"
-                    f"📦 Pickup: {pickup}\n"
-                    f"🏁 Delivery: {delivery}\n"
-                    f"📏 Distance to Pickup: {round(distance)} mi"
-                )
-                send_telegram(driver["chat_id"], message)
-                print(f"📨 Sent to {driver['driver_name']} ({driver['chat_id']}) ✅")
+📦 Pickup ZIP: {pickup_zip}
+📏 Distance: {driver['distance']} mi"
+            sent = send_to_telegram(driver['id'], text)
+            print(f"📨 Sent to driver {driver['truck']} ✅" if sent else f"❌ Failed to send to {driver['truck']}")
 
     except Exception as e:
         print("❌ Error:", e)
 
     return "", 200
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
