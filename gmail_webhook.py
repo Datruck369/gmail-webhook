@@ -13,7 +13,7 @@ from geopy.geocoders import Nominatim
 
 # === CONFIG ===
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-TELEGRAM_TOKEN = 'your_telegram_token_here'  # Replace with your bot token
+TELEGRAM_TOKEN = '8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20'  # Replace with your bot token
 DRIVERS_CSV = 'drivers.csv'
 ZIP_COORDINATES_FILE = 'zip_coordinates.csv'
 
