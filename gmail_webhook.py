@@ -1,4 +1,3 @@
-
 from flask import Flask, request
 import base64
 import os
@@ -114,10 +113,7 @@ def gmail_notify():
         print(f"🚛 Found {len(drivers)} drivers near {pickup_zip}")
 
         for driver in drivers:
-            text = f"🚚 New Load for {driver['truck']}:
-
-📦 Pickup ZIP: {pickup_zip}
-📏 Distance: {driver['distance']} mi"
+            text = f"🚚 New Load for {driver['truck']}:\n\n📦 Pickup ZIP: {pickup_zip}\n📏 Distance: {driver['distance']} mi"
             sent = send_to_telegram(driver['id'], text)
             print(f"📨 Sent to driver {driver['truck']} ✅" if sent else f"❌ Failed to send to {driver['truck']}")
 
