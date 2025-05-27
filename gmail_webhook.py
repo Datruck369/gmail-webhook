@@ -95,17 +95,28 @@ def gmail_notify():
         service = get_gmail_service()
         message = get_latest_email(service)
 
+        if not message:
+            print("⚠️ No email content returned.")
+            return "", 200
+
         print("📩 FULL EMAIL BODY ↓↓↓↓↓↓↓")
         print(message)
 
         pickup_zip = extract_zip(message)
+        if not pickup_zip:
+            print("❌ No ZIP code found in message.")
+            return "", 200
+
         print("📍 Found pickup ZIP:", pickup_zip)
 
         drivers = get_nearby_drivers(pickup_zip)
         print(f"🚛 Found {len(drivers)} drivers near {pickup_zip}")
 
         for driver in drivers:
-            text = f"🚚 New Load for {driver['truck']}:\n\n📦 Pickup ZIP: {pickup_zip}\n📏 Distance: {driver['distance']} mi"
+            text = f"🚚 New Load for {driver['truck']}:
+
+📦 Pickup ZIP: {pickup_zip}
+📏 Distance: {driver['distance']} mi"
             sent = send_to_telegram(driver['id'], text)
             print(f"📨 Sent to driver {driver['truck']} ✅" if sent else f"❌ Failed to send to {driver['truck']}")
 
