@@ -12,6 +12,7 @@ from geopy.geocoders import Nominatim
 import csv
 
 app = Flask(__name__)
+print("🚀 LIVE VERSION STARTED 🚀")
 
 TELEGRAM_BOT_TOKEN = "8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20"
 
