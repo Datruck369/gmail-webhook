@@ -15,7 +15,7 @@ import re
 app = Flask(__name__)
 
 # === CONFIG ===
-TELEGRAM_BOT_TOKEN = "your-telegram-token-here"  # ⬅️ Replace this
+TELEGRAM_BOT_TOKEN = "8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20"  # ⬅️ Replace this
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 RADIUS_MILES = 150
 geolocator = Nominatim(user_agent="zip-radius-filter")
