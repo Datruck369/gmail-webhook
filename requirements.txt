@@ -1,7 +1,6 @@
-Flask
-google-api-python-client
-google-auth
-google-auth-oauthlib
-geopy
-beautifulsoup4
-requests
+Flask==2.3.3
+google-auth==2.29.0
+google-auth-oauthlib==1.2.0
+google-api-python-client==2.126.0
+python-telegram-bot==13.15
+pandas==2.2.2
