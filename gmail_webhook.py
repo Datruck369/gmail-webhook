@@ -139,7 +139,9 @@ def load_credentials():
             if creds and creds.expired and creds.refresh_token:
                 logger.info("Token expired, attempting to refresh...")
                 try:
-                    creds.refresh(Request())
+                    # Create a secure request object
+                    request = Request()
+                    creds.refresh(request)
                     # Save the refreshed token
                     with open(token_file, 'w') as token:
                         token.write(creds.to_json())
@@ -349,14 +351,14 @@ def send_to_telegram(data: LoadData, chat_id: str = None):
     except Exception as e:
         logger.error(f"Failed to send to Telegram: {e}")
 
-def safe_gmail_api_call(func, *args, **kwargs):
+def safe_gmail_api_call(api_method, **kwargs):
     """Safely execute Gmail API calls with SSL error handling"""
     max_retries = 3
     ssl_exceptions = (ssl.SSLError, ConnectionError, OSError)
     
     for attempt in range(max_retries):
         try:
-            return func(*args, **kwargs)
+            return api_method(**kwargs).execute()
         except ssl_exceptions as e:
             if attempt < max_retries - 1:
                 delay = exponential_backoff(attempt)
@@ -393,16 +395,15 @@ if not creds:
 
 try:
     logger.info("🔧 Initializing Gmail service...")
-    # Create service with secure HTTP client
-    http_client = create_secure_http_client()
-    service = build('gmail', 'v1', credentials=creds, http=http_client)
+    # Initialize Gmail service (credentials handle HTTP client internally)
+    service = build('gmail', 'v1', credentials=creds)
     
     logger.info("🤖 Initializing Telegram bot...")
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     
     # Test the services
     logger.info("🧪 Testing Gmail connection...")
-    profile = safe_gmail_api_call(service.users().getProfile(userId='me').execute)
+    profile = safe_gmail_api_call(service.users().getProfile, userId='me')
     if profile:
         logger.info(f"✅ Gmail connected successfully for: {profile.get('emailAddress', 'Unknown')}")
     else:
