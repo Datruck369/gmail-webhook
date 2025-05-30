@@ -1,160 +1,237 @@
 #!/usr/bin/env python3
-"""
-Debug version to identify token.pkl issue
-"""
+
 import os
 import sys
 import traceback
+import json
+import logging
+import base64
+import re
+import csv
+from flask import Flask, request, jsonify
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from telegram import Bot
+from telegram.error import TelegramError
+from geopy.distance import geodesic
+from typing import Dict, List, Optional, Tuple
 
-print("="*50)
-print("🚀 DEBUGGING GMAIL WEBHOOK - NEW VERSION")
-print("="*50)
+# ========== CONFIGURATION ==========
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20')
+CHAT_ID = os.environ.get('CHAT_ID', '5972776745')
 
-print(f"Python version: {sys.version}")
-print(f"Current working directory: {os.getcwd()}")
-print(f"Script location: {__file__}")
+# ========== LOGGING SETUP ==========
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# List all files
-print("\n📁 Files in current directory:")
-for file in os.listdir('.'):
-    print(f"  - {file}")
+# ========== FLASK APP INIT ==========
+app = Flask(__name__)
 
-# Check for token files specifically
-token_files = ['token.json', 'token.pkl', 'credentials.json']
-print("\n🔑 Token file check:")
-for file in token_files:
-    exists = os.path.exists(file)
-    print(f"  - {file}: {'✅ EXISTS' if exists else '❌ NOT FOUND'}")
+# ========== DATA MODELS ==========
+class LoadData:
+    def __init__(self, pickup: str, delivery: str, miles: str, vehicle: str):
+        self.pickup = pickup
+        self.delivery = delivery
+        self.miles = miles
+        self.vehicle = vehicle
 
-# Search for any token.pkl references in the current file
-print("\n🔍 Checking current file for token.pkl references:")
-try:
-    with open(__file__, 'r') as f:
-        content = f.read()
-        if 'token.pkl' in content.lower():
-            print("❌ FOUND token.pkl reference in current file!")
-            lines = content.split('\n')
-            for i, line in enumerate(lines, 1):
-                if 'token.pkl' in line.lower():
-                    print(f"  Line {i}: {line.strip()}")
-        else:
-            print("✅ No token.pkl references found in current file")
-except Exception as e:
-    print(f"❌ Error reading current file: {e}")
+    def to_dict(self) -> Dict[str, str]:
+        return {
+            "pickup": self.pickup,
+            "delivery": self.delivery,
+            "miles": self.miles,
+            "vehicle": self.vehicle
+        }
 
-print("\n" + "="*50)
-print("STARTING ACTUAL APPLICATION")
-print("="*50)
+class Driver:
+    def __init__(self, driver_id: str, truck: str, zip_code: str, lat: float, lng: float):
+        self.id = driver_id
+        self.truck = truck
+        self.zip = zip_code
+        self.lat = lat
+        self.lng = lng
 
-try:
-    import json
-    import logging
-    from flask import Flask, request, jsonify
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
-    from googleapiclient.discovery import build
-    
-    # Setup logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger(__name__)
-    
-    app = Flask(__name__)
-    
-    SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-    TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-    CHAT_ID = os.environ.get('CHAT_ID')
-    
-    print(f"🤖 Telegram token configured: {'YES' if TELEGRAM_BOT_TOKEN else 'NO'}")
-    print(f"💬 Chat ID configured: {'YES' if CHAT_ID else 'NO'}")
-    
-    def load_credentials_debug():
-        """Load credentials with extensive debugging"""
-        logger.info("🔍 ENTERING load_credentials_debug function")
-        
-        # Double-check we're not looking for token.pkl
-        logger.info("📋 Files check inside function:")
-        for file in ['token.json', 'token.pkl']:
-            exists = os.path.exists(file)
-            logger.info(f"  {file}: {'EXISTS' if exists else 'NOT FOUND'}")
-        
-        token_file = 'token.json'
-        logger.info(f"🎯 Will attempt to load: {token_file}")
-        
-        if not os.path.exists(token_file):
-            logger.error(f"❌ {token_file} not found!")
-            logger.error(f"📁 Current directory: {os.getcwd()}")
-            logger.error(f"📋 Available files: {os.listdir('.')}")
-            return None
-        
-        try:
-            logger.info(f"📖 Reading file: {token_file}")
-            creds = Credentials.from_authorized_user_file(token_file, SCOPES)
-            logger.info("✅ Successfully loaded credentials from token.json")
-            return creds
-        except Exception as e:
-            logger.error(f"❌ Error loading credentials: {e}")
-            logger.error(f"❌ Exception type: {type(e)}")
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
-            return None
-    
-    # Try to load credentials
-    logger.info("🚀 Attempting to load credentials...")
-    creds = load_credentials_debug()
-    
-    if not creds:
-        logger.error("❌ Failed to load credentials")
-        print("❌ CREDENTIALS LOADING FAILED")
-        sys.exit(1)
-    
-    # Initialize Gmail service
-    logger.info("🔧 Building Gmail service...")
+    @property
+    def coordinates(self) -> Tuple[float, float]:
+        return (self.lat, self.lng)
+
+# ========== HELPER FUNCTIONS ==========
+def load_credentials():
+    token_file = 'token.json'
+    if not os.path.exists(token_file):
+        logger.error(f"token.json not found in: {os.getcwd()}")
+        return None
     try:
-        service = build('gmail', 'v1', credentials=creds)
-        logger.info("✅ Gmail service created successfully")
+        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open(token_file, 'w') as token:
+                token.write(creds.to_json())
+        return creds
     except Exception as e:
-        logger.error(f"❌ Error building Gmail service: {e}")
-        print(f"❌ GMAIL SERVICE FAILED: {e}")
-        sys.exit(1)
-    
-    @app.route("/", methods=["GET"])
-    def home():
-        return jsonify({
-            "status": "running",
-            "version": "debug-version",
-            "message": "Gmail webhook debug version is running",
-            "files_found": os.listdir('.'),
-            "token_json_exists": os.path.exists('token.json'),
-            "token_pkl_exists": os.path.exists('token.pkl')
-        })
-    
-    @app.route("/test-gmail", methods=["GET"])
-    def test_gmail():
-        try:
-            profile = service.users().getProfile(userId='me').execute()
-            return jsonify({
-                "status": "success",
-                "email": profile.get('emailAddress'),
-                "message": "Gmail API is working!"
-            })
-        except Exception as e:
-            return jsonify({
-                "status": "error",
-                "error": str(e)
-            }), 500
-    
-    @app.route("/gmail-notify", methods=["POST"])
-    def gmail_notify():
-        logger.info("📩 Gmail notification received")
-        return jsonify({"status": "received"}), 200
-    
-    if __name__ == "__main__":
-        print("🎯 Starting Flask application...")
-        logger.info("🚀 Debug Gmail Webhook Starting")
-        app.run(host="0.0.0.0", port=8080, debug=False)
+        logger.error(f"Failed to load credentials: {e}")
+        return None
 
-except Exception as e:
-    print(f"❌ CRITICAL ERROR: {e}")
-    print(f"❌ Exception type: {type(e)}")
-    print(f"❌ Traceback:")
-    traceback.print_exc()
+def extract_plain_text_from_message(message):
+    try:
+        payload = message.get('payload', {})
+        parts = payload.get('parts', [payload])
+        for part in parts:
+            if part.get('mimeType') == 'text/plain':
+                body_data = part.get('body', {}).get('data')
+                if body_data:
+                    return base64.urlsafe_b64decode(body_data).decode('utf-8')
+        body_data = payload.get('body', {}).get('data')
+        if body_data:
+            return base64.urlsafe_b64decode(body_data).decode('utf-8')
+        return None
+    except Exception as e:
+        logger.error(f"Failed to extract body: {e}")
+        return None
+
+def parse_email_body(body: str) -> Optional[LoadData]:
+    try:
+        # Replace with actual parsing logic from email content
+        return LoadData(
+            pickup="New York, NY",
+            delivery="Atlanta, GA",
+            miles="890 mi",
+            vehicle="Sprinter"
+        )
+    except Exception as e:
+        logger.error(f"Error parsing email body: {e}")
+        return None
+
+def load_drivers() -> List[Driver]:
+    drivers = []
+    try:
+        with open("drivers.csv", newline="", encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                drivers.append(Driver(
+                    driver_id=row["id"],
+                    truck=row["truck"],
+                    zip_code=row["zip"],
+                    lat=float(row["lat"]),
+                    lng=float(row["lng"])
+                ))
+        logger.info(f"Loaded {len(drivers)} drivers from CSV")
+    except Exception as e:
+        logger.error(f"Error loading drivers.csv: {e}")
+    return drivers
+
+def extract_zip_code(body: str) -> Optional[str]:
+    patterns = [
+        r'Pick[-\s]*Up\s+.*?(\d{5})',
+        r'Pickup\s+.*?(\d{5})',
+        r'Origin\s+.*?(\d{5})',
+        r'\b(\d{5})\b'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, body, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+def get_zip_coordinates(zip_code: str) -> Optional[Tuple[float, float]]:
+    zip_map = {
+        "30303": (33.755, -84.39),
+        "77001": (29.76, -95.36),
+        "75201": (32.78, -96.8),
+        "10001": (40.7128, -74.0060),
+        "90210": (34.0522, -118.2437),
+        "60601": (41.8781, -87.6298),
+        "77493": (29.7858, -95.8245),
+    }
+    return zip_map.get(zip_code)
+
+def send_to_telegram(data: LoadData, chat_id: str = None):
+    try:
+        text = (
+            f"📦 *New Load Alert!*\n\n"
+            f"🚚 Vehicle: {data.vehicle}\n"
+            f"📍 Pickup: {data.pickup}\n"
+            f"🏁 Delivery: {data.delivery}\n"
+            f"🛣️ Miles: {data.miles}"
+        )
+        bot.send_message(chat_id=chat_id or CHAT_ID, text=text, parse_mode="Markdown")
+    except TelegramError as e:
+        logger.error(f"Telegram error: {e}")
+    except Exception as e:
+        logger.error(f"Failed to send to Telegram: {e}")
+
+# ========== INIT SERVICES ==========
+logger.info("Loading Gmail credentials...")
+creds = load_credentials()
+if not creds:
+    logger.error("Unable to load credentials. Exiting.")
     sys.exit(1)
+
+try:
+    service = build('gmail', 'v1', credentials=creds)
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+except Exception as e:
+    logger.error(f"Service initialization failed: {e}")
+    sys.exit(1)
+
+# ========== FLASK ROUTES ==========
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status": "running", "token.json": os.path.exists('token.json')})
+
+@app.route("/test-telegram", methods=["GET"])
+def test_telegram():
+    send_to_telegram(LoadData("Test Pickup", "Test Delivery", "123 mi", "Sprinter"))
+    return jsonify({"status": "sent"})
+
+@app.route("/gmail-notify", methods=["POST"])
+def gmail_notify():
+    logger.info("📩 Gmail notification received")
+    try:
+        results = service.users().messages().list(userId='me', maxResults=1).execute()
+        messages = results.get('messages', [])
+        if not messages:
+            return jsonify({"status": "no messages"}), 200
+
+        msg_id = messages[0]['id']
+        message = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
+        body = extract_plain_text_from_message(message)
+
+        if not body:
+            return jsonify({"status": "empty body"}), 200
+
+        if any(word in body.upper() for word in ["SPRINTER", "CARGO VAN", "VAN"]):
+            zip_code = extract_zip_code(body)
+            if not zip_code:
+                logger.warning("ZIP code not found.")
+                return jsonify({"status": "no zip"}), 200
+
+            coords = get_zip_coordinates(zip_code)
+            if not coords:
+                logger.warning(f"Coordinates not found for ZIP {zip_code}")
+                return jsonify({"status": "no coordinates"}), 200
+
+            drivers = load_drivers()
+            for driver in drivers:
+                distance = geodesic(coords, driver.coordinates).miles
+                if distance <= 150:
+                    send_to_telegram(parse_email_body(body), driver.id)
+                    logger.info(f"📤 Alert sent to driver {driver.id} ({distance:.1f} mi)")
+
+            send_to_telegram(parse_email_body(body))  # Also send to main group
+            return jsonify({"status": "alerts sent"}), 200
+
+        else:
+            logger.info("No relevant keywords in message.")
+            return jsonify({"status": "ignored"}), 200
+
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# ========== MAIN ==========
+if __name__ == "__main__":
+    logger.info("🚀 Starting Gmail Webhook Bot")
+    app.run(host="0.0.0.0", port=8080)
