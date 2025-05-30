@@ -326,6 +326,8 @@ def gmail_notify():
     try:
         # Add retry logic for SSL errors
         max_retries = 3
+        results = None
+        
         for attempt in range(max_retries):
             try:
                 results = service.users().messages().list(userId='me', maxResults=1).execute()
@@ -333,6 +335,49 @@ def gmail_notify():
             except Exception as ssl_error:
                 if "SSL" in str(ssl_error) and attempt < max_retries - 1:
                     logger.warning(f"SSL error on attempt {attempt + 1}, retrying...")
+                    continue
+                else:
+                    raise ssl_error
+        
+        if not results:
+            logger.error("Failed to get messages after retries")
+            return jsonify({"status": "error", "message": "Failed to fetch messages"}), 500
+            
+        messages = results.get('messages', [])
+        if not messages:
+            logger.info("No messages found")
+            return jsonify({"status": "no_messages"})
+        
+        # Get the latest message
+        message_id = messages[0]['id']
+        message = service.users().messages().get(userId='me', id=message_id).execute()
+        
+        # Extract email body
+        body = extract_plain_text_from_message(message)
+        if not body:
+            logger.warning("Could not extract email body")
+            return jsonify({"status": "no_body"})
+        
+        # Parse the load data
+        load_data = parse_email_body(body)
+        if load_data:
+            # Send to Telegram
+            send_to_telegram(load_data)
+            logger.info("✅ Load data sent to Telegram")
+            
+            return jsonify({
+                "status": "success",
+                "message": "Load data processed and sent to Telegram",
+                "data": load_data.to_dict()
+            })
+        else:
+            logger.warning("Failed to parse load data")
+            return jsonify({"status": "parse_error"})
+            
+    except Exception as e:
+        logger.error(f"Error processing Gmail notification: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # ========== MAIN ==========
 if __name__ == '__main__':
