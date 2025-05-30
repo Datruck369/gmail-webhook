@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+# ========== DATA MODELS ==========
+class LoadData:
+    def __init__(self,#!/usr/bin/env python3
 
 import os
 import sys
@@ -31,18 +33,34 @@ app = Flask(__name__)
 
 # ========== DATA MODELS ==========
 class LoadData:
-    def __init__(self, pickup: str, delivery: str, miles: str, vehicle: str):
+    def __init__(self, pickup: str, pickup_date: str, delivery: str, delivery_date: str, 
+                 miles: str, vehicle: str, pieces: str = "N/A", weight: str = "N/A", 
+                 dimensions: str = "N/A", stackable: str = "N/A", notes: str = "N/A"):
         self.pickup = pickup
+        self.pickup_date = pickup_date
         self.delivery = delivery
+        self.delivery_date = delivery_date
         self.miles = miles
         self.vehicle = vehicle
+        self.pieces = pieces
+        self.weight = weight
+        self.dimensions = dimensions
+        self.stackable = stackable
+        self.notes = notes
 
     def to_dict(self) -> Dict[str, str]:
         return {
             'pickup': self.pickup,
+            'pickup_date': self.pickup_date,
             'delivery': self.delivery,
+            'delivery_date': self.delivery_date,
             'miles': self.miles,
-            'vehicle': self.vehicle
+            'vehicle': self.vehicle,
+            'pieces': self.pieces,
+            'weight': self.weight,
+            'dimensions': self.dimensions,
+            'stackable': self.stackable,
+            'notes': self.notes
         }
 
 class Driver:
@@ -115,44 +133,80 @@ def extract_plain_text_from_message(message):
 
 def parse_email_body(body: str) -> Optional[LoadData]:
     try:
-        # Extract pickup location
-        pickup_match = re.search(r'\*\*Pick-Up\*\*\s*\n?\*\*([^*]+)\*\*', body, re.IGNORECASE | re.MULTILINE)
+        # Log the raw email body for debugging
+        logger.info(f"📧 Raw email body preview: {body[:500]}...")
+        
+        # Extract pickup location (after **Pick-Up**)
+        pickup_match = re.search(r'\*\*Pick-Up\*\*\s*\n\*\*([^*]+)\*\*', body, re.IGNORECASE | re.MULTILINE)
         pickup = pickup_match.group(1).strip() if pickup_match else "Unknown Pickup"
         
-        # Extract delivery location
-        delivery_match = re.search(r'\*\*Delivery\*\*\s*\n?\*\*([^*]+)\*\*', body, re.IGNORECASE | re.MULTILINE)
+        # Extract pickup date (line after pickup location)
+        pickup_date_match = re.search(r'\*\*Pick-Up\*\*\s*\n\*\*[^*]+\*\*\s*\n([^\n]+)', body, re.IGNORECASE | re.MULTILINE)
+        pickup_date = pickup_date_match.group(1).strip() if pickup_date_match else "N/A"
+        
+        # Extract delivery location (after **Delivery**)
+        delivery_match = re.search(r'\*\*Delivery\*\*\s*\n\*\*([^*]+)\*\*', body, re.IGNORECASE | re.MULTILINE)
         delivery = delivery_match.group(1).strip() if delivery_match else "Unknown Delivery"
         
-        # Extract miles (looking for pattern like "2 STOPS, 156 MILES")
-        miles_match = re.search(r'\*\*.*?(\d+)\s+MILES\*\*', body, re.IGNORECASE)
-        miles = f"{miles_match.group(1)} miles" if miles_match else "Unknown Miles"
+        # Extract delivery date (line after delivery location)
+        delivery_date_match = re.search(r'\*\*Delivery\*\*\s*\n\*\*[^*]+\*\*\s*\n([^\n]+)', body, re.IGNORECASE | re.MULTILINE)
+        delivery_date = delivery_date_match.group(1).strip() if delivery_date_match else "N/A"
+        
+        # Extract miles (pattern like "2 STOPS, 1,269 MILES")
+        miles_match = re.search(r'\*\*.*?(\d{1,3}(?:,\d{3})*)\s+MILES\*\*', body, re.IGNORECASE)
+        miles = miles_match.group(1) if miles_match else "N/A"
         
         # Extract vehicle type
         vehicle_match = re.search(r'\*\*Vehicle required:\s*([^*]+)\*\*', body, re.IGNORECASE)
-        vehicle = vehicle_match.group(1).strip() if vehicle_match else "Unknown Vehicle"
+        vehicle = vehicle_match.group(1).strip() if vehicle_match else "N/A"
         
-        # Also check Load Type as backup
-        if vehicle == "Unknown Vehicle":
-            load_type_match = re.search(r'\*\*Load Type:\s*([^*]+)\*\*', body, re.IGNORECASE)
-            vehicle = load_type_match.group(1).strip() if load_type_match else "Unknown Vehicle"
+        # Extract pieces
+        pieces_match = re.search(r'\*\*Pieces:\s*([^*]+)\*\*', body, re.IGNORECASE)
+        pieces = pieces_match.group(1).strip() if pieces_match else "N/A"
         
-        logger.info(f"📋 Parsed load: {pickup} → {delivery}, {miles}, {vehicle}")
+        # Extract weight
+        weight_match = re.search(r'\*\*Weight:\s*([^*]+)\*\*', body, re.IGNORECASE)
+        weight = weight_match.group(1).strip() if weight_match else "N/A"
+        
+        # Extract dimensions
+        dimensions_match = re.search(r'\*\*Dimensions:\s*([^*]+)\*\*', body, re.IGNORECASE)
+        dimensions = dimensions_match.group(1).strip() if dimensions_match else "N/A"
+        
+        # Extract stackable
+        stackable_match = re.search(r'\*\*Stackable:\s*([^*]+)\*\*', body, re.IGNORECASE)
+        stackable = stackable_match.group(1).strip() if stackable_match else "N/A"
+        
+        # Extract notes (everything after **Notes: **)
+        notes_match = re.search(r'\*\*Notes:\s*\*\*([^*]*(?:\*(?!\*)[^*]*)*)', body, re.IGNORECASE | re.DOTALL)
+        notes = notes_match.group(1).strip() if notes_match else "N/A"
+        
+        logger.info(f"📋 Parsed load: {pickup} → {delivery}, {miles} miles, {vehicle}")
         
         return LoadData(
             pickup=pickup,
+            pickup_date=pickup_date,
             delivery=delivery,
+            delivery_date=delivery_date,
             miles=miles,
-            vehicle=vehicle
+            vehicle=vehicle,
+            pieces=pieces,
+            weight=weight,
+            dimensions=dimensions,
+            stackable=stackable,
+            notes=notes
         )
         
     except Exception as e:
         logger.error(f"Error parsing email body: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         # Return a basic load data with available info
         return LoadData(
             pickup="Parse Error",
+            pickup_date="N/A",
             delivery="Parse Error", 
-            miles="Unknown",
-            vehicle="Unknown"
+            delivery_date="N/A",
+            miles="N/A",
+            vehicle="N/A"
         )
 
 def load_drivers() -> List[Driver]:
@@ -230,12 +284,20 @@ def send_to_telegram(data: LoadData, chat_id: str = None):
     try:
         text = (
             f"📦 *New Load Alert!*\n\n"
-            f"🚚 *Vehicle:* {data.vehicle}\n"
-            f"📍 *Pickup:* {data.pickup}\n"
-            f"🏁 *Delivery:* {data.delivery}\n"
-            f"🛣️ *Miles:* {data.miles}"
+            f"📍 *Pick-up:* {data.pickup}\n"
+            f"📅 *Pick-up date (EST):* {data.pickup_date}\n"
+            f"🏁 *Deliver to:* {data.delivery}\n"
+            f"📅 *Deliver date (EST):* {data.delivery_date}\n"
+            f"🛣️ *Estimated Miles:* {data.miles}\n"
+            f"🚚 *Suggested Truck Size:* {data.vehicle}\n"
+            f"📦 *Pieces:* {data.pieces}\n"
+            f"⚖️ *Weight:* {data.weight}\n"
+            f"📏 *Dims:* {data.dimensions}\n"
+            f"📚 *Stackable:* {data.stackable}\n"
+            f"📝 *Notes:* {data.notes}"
         )
         bot.send_message(chat_id=chat_id or CHAT_ID, text=text, parse_mode='Markdown')
+        logger.info("✅ Message sent to Telegram successfully")
     except TelegramError as e:
         logger.error(f"Telegram error: {e}")
     except Exception as e:
@@ -285,29 +347,29 @@ def health():
 def test_telegram():
     # Test with your actual email format
     test_email = """**Pick-Up**
-**Laredo, TX 78040**
-Deliver Direct
+**Lenexa, KS 66215**
+06/02/25 09:00 EST
 **Delivery**
-**San Antonio, TX 78265**
-Deliver Direct
-**2 STOPS, 156 MILES**
-**Broker Name: Terrance Crawford**
-**Broker Company: XPO LOGISTICS LLC**
-**Broker Phone: 855.744.7976**
-**Email: terrance.crawford@rxo.com**
-**Posted: 05/30/25 16:31 EST**
-**Expires: 05/30/25 16:59 EST**
+**Tampa, FL 33618**
+06/04/25 08:00 EST
+**2 STOPS, 1,269 MILES**
+**Broker Name: Mark Stack**
+**Broker Company: Express Logistics LLC**
+**Broker Phone: 814.454.4373**
+**Email: mark.stack@expressfamily.com**
+**Posted: 05/30/25 16:44 EST**
+**Expires: 05/30/25 17:12 EST**
 **Dock Level: No**
 **Hazmat: No**
 **Posted Amount: $0.00**
-**Load Type: Sprinter**
-**Vehicle required: CARGO VAN**
-**Pieces: 0**
-**Weight: 0 lbs**
-**Dimensions: 0L x 0W x 0H**
+**Load Type: Expedited Load**
+**Vehicle required: SPRINTER**
+**Pieces: 1**
+**Weight: 245 lbs**
+**Dimensions: 99L x 49W x 18H**
 **Stackable: No**
 **CSA/Fast Load: No**
-**Notes: **CALL DO NOT EMAIL 704.785.1944"""
+**Notes: **EMAIL ONLY - *Driver needs to open the boxes on the pallet and hand carry the individual pieces into the store at delivery* these are not heavy. they are signs"""
     
     # Parse the test email
     load_data = parse_email_body(test_email)
