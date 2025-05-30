@@ -19,8 +19,8 @@ from typing import Dict, List, Optional, Tuple
 
 # ========== CONFIGURATION ==========
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20')
-CHAT_ID = os.environ.get('CHAT_ID', '5972776745')
+TELEGRAM_BOT_TOKEN = '8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20'
+CHAT_ID = '5972776745'
 
 # ========== LOGGING SETUP ==========
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -39,10 +39,10 @@ class LoadData:
 
     def to_dict(self) -> Dict[str, str]:
         return {
-            "pickup": self.pickup,
-            "delivery": self.delivery,
-            "miles": self.miles,
-            "vehicle": self.vehicle
+            'pickup': self.pickup,
+            'delivery': self.delivery,
+            'miles': self.miles,
+            'vehicle': self.vehicle
         }
 
 class Driver:
@@ -60,21 +60,40 @@ class Driver:
 # ========== HELPER FUNCTIONS ==========
 def load_credentials():
     token_file = 'token.json'
+    credentials_file = 'credentials.json'
+    
     if not os.path.exists(token_file):
-        logger.error(f"❌ token.json not found at: {token_file}")
+        logger.error(f"token.json not found in {os.getcwd()}")
+        logger.info("You need to run the OAuth flow first. Create a credentials.json file from Google Cloud Console.")
         return None
+    
     try:
-        with open(token_file, 'r') as f:
-            token_data = json.load(f)
-        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            with open(token_file, 'w') as f:
-                f.write(creds.to_json())
-        logger.info("✅ Gmail credentials loaded successfully")
+        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+        
+        # Check if credentials are valid
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                logger.info("Token expired, attempting to refresh...")
+                try:
+                    creds.refresh(Request())
+                    # Save the refreshed token
+                    with open(token_file, 'w') as token:
+                        token.write(creds.to_json())
+                    logger.info("✅ Token refreshed successfully")
+                except Exception as refresh_error:
+                    logger.error(f"Failed to refresh token: {refresh_error}")
+                    logger.error("You may need to re-run the OAuth flow")
+                    return None
+            else:
+                logger.error("Invalid credentials - no refresh token available")
+                logger.error("You need to delete token.json and run the OAuth flow again")
+                return None
+        
         return creds
+        
     except Exception as e:
-        logger.error(f"❌ Failed to load credentials: {e}")
+        logger.error(f"Failed to load credentials: {e}")
+        logger.error("Try deleting token.json and running the OAuth flow again")
         return None
 
 def extract_plain_text_from_message(message):
@@ -96,6 +115,8 @@ def extract_plain_text_from_message(message):
 
 def parse_email_body(body: str) -> Optional[LoadData]:
     try:
+        # This is a placeholder - you'll need to implement actual parsing logic
+        # based on your email format
         return LoadData(
             pickup="New York, NY",
             delivery="Atlanta, GA",
@@ -109,15 +130,15 @@ def parse_email_body(body: str) -> Optional[LoadData]:
 def load_drivers() -> List[Driver]:
     drivers = []
     try:
-        with open("drivers.csv", newline="", encoding='utf-8') as csvfile:
+        with open('drivers.csv', newline='', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
             for row in reader:
                 drivers.append(Driver(
-                    driver_id=row["id"],
-                    truck=row["truck"],
-                    zip_code=row["zip"],
-                    lat=float(row["lat"]),
-                    lng=float(row["lng"])
+                    driver_id=row['id'],
+                    truck=row['truck'],
+                    zip_code=row['zip'],
+                    lat=float(row['lat']),
+                    lng=float(row['lng'])
                 ))
         logger.info(f"Loaded {len(drivers)} drivers from CSV")
     except Exception as e:
@@ -126,9 +147,9 @@ def load_drivers() -> List[Driver]:
 
 def extract_zip_code(body: str) -> Optional[str]:
     patterns = [
-        r'Pick[-\s]*Up\s+.*?(\d{5})',
-        r'Pickup\s+.*?(\d{5})',
-        r'Origin\s+.*?(\d{5})',
+        r'Pick[-\s]+Up\s+.*(\d{5})',
+        r'Pickup\s+.*(\d{5})',
+        r'Origin\s+.*(\d{5})',
         r'\b(\d{5})\b'
     ]
     for pattern in patterns:
@@ -139,13 +160,12 @@ def extract_zip_code(body: str) -> Optional[str]:
 
 def get_zip_coordinates(zip_code: str) -> Optional[Tuple[float, float]]:
     zip_map = {
-        "30303": (33.755, -84.39),
-        "77001": (29.76, -95.36),
-        "75201": (32.78, -96.8),
-        "10001": (40.7128, -74.0060),
-        "90210": (34.0522, -118.2437),
-        "60601": (41.8781, -87.6298),
-        "77493": (29.7858, -95.8245),
+        '30303': (33.755, -84.39),
+        '77001': (29.76, -95.36),
+        '75201': (32.78, -96.8),
+        '10001': (40.7128, -74.0060),
+        '90210': (34.0522, -118.2437),
+        '60601': (41.8781, -87.6298),
     }
     return zip_map.get(zip_code)
 
@@ -153,42 +173,63 @@ def send_to_telegram(data: LoadData, chat_id: str = None):
     try:
         text = (
             f"📦 *New Load Alert!*\n\n"
-            f"🚚 Vehicle: {data.vehicle}\n"
-            f"📍 Pickup: {data.pickup}\n"
-            f"🏁 Delivery: {data.delivery}\n"
-            f"🛣️ Miles: {data.miles}"
+            f"🚚 *Vehicle:* {data.vehicle}\n"
+            f"📍 *Pickup:* {data.pickup}\n"
+            f"🏁 *Delivery:* {data.delivery}\n"
+            f"🛣️ *Miles:* {data.miles}"
         )
-        bot.send_message(chat_id=chat_id or CHAT_ID, text=text, parse_mode="Markdown")
+        bot.send_message(chat_id=chat_id or CHAT_ID, text=text, parse_mode='Markdown')
     except TelegramError as e:
         logger.error(f"Telegram error: {e}")
     except Exception as e:
         logger.error(f"Failed to send to Telegram: {e}")
 
 # ========== INIT SERVICES ==========
-logger.info("Loading Gmail credentials...")
+logger.info("🔑 Loading Gmail credentials...")
 creds = load_credentials()
 if not creds:
-    logger.error("Unable to load credentials. Exiting.")
+    logger.error("❌ Unable to load credentials. Please check your OAuth setup.")
+    logger.error("Steps to fix:")
+    logger.error("1. Ensure you have credentials.json from Google Cloud Console")
+    logger.error("2. Delete token.json if it exists")
+    logger.error("3. Run OAuth flow to generate new token.json")
     sys.exit(1)
 
 try:
+    logger.info("🔧 Initializing Gmail service...")
     service = build('gmail', 'v1', credentials=creds)
+    
+    logger.info("🤖 Initializing Telegram bot...")
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    
+    # Test the services
+    logger.info("🧪 Testing Gmail connection...")
+    profile = service.users().getProfile(userId='me').execute()
+    logger.info(f"✅ Gmail connected successfully for: {profile.get('emailAddress', 'Unknown')}")
+    
+    logger.info("🧪 Testing Telegram connection...")
+    bot_info = bot.get_me()
+    logger.info(f"✅ Telegram bot connected successfully: @{bot_info.username}")
+    
 except Exception as e:
-    logger.error(f"Service initialization failed: {e}")
+    logger.error(f"❌ Service initialization failed: {e}")
+    logger.error("This could be due to:")
+    logger.error("1. Invalid or expired OAuth token")
+    logger.error("2. Invalid Telegram bot token") 
+    logger.error("3. Network connectivity issues")
     sys.exit(1)
 
 # ========== FLASK ROUTES ==========
-@app.route("/", methods=["GET"])
+@app.route('/', methods=['GET'])
 def health():
     return jsonify({"status": "running", "token.json": os.path.exists('token.json')})
 
-@app.route("/test-telegram", methods=["GET"])
+@app.route('/test-telegram', methods=['GET'])
 def test_telegram():
     send_to_telegram(LoadData("Test Pickup", "Test Delivery", "123 mi", "Sprinter"))
     return jsonify({"status": "sent"})
 
-@app.route("/gmail-notify", methods=["POST"])
+@app.route('/gmail-notify', methods=['POST'])
 def gmail_notify():
     logger.info("📩 Gmail notification received")
     try:
@@ -204,7 +245,7 @@ def gmail_notify():
         if not body:
             return jsonify({"status": "empty body"}), 200
 
-        if any(word in body.upper() for word in ["SPRINTER", "CARGO VAN", "VAN"]):
+        if any(word in body.upper() for word in ['SPRINTER', 'CARGO VAN', 'VAN']):
             zip_code = extract_zip_code(body)
             if not zip_code:
                 logger.warning("ZIP code not found.")
@@ -234,6 +275,6 @@ def gmail_notify():
         return jsonify({"error": str(e)}), 500
 
 # ========== MAIN ==========
-if __name__ == "__main__":
+if __name__ == '__main__':
     logger.info("🚀 Starting Gmail Webhook Bot")
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host='0.0.0.0', port=8080)
