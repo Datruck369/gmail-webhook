@@ -115,17 +115,45 @@ def extract_plain_text_from_message(message):
 
 def parse_email_body(body: str) -> Optional[LoadData]:
     try:
-        # This is a placeholder - you'll need to implement actual parsing logic
-        # based on your email format
+        # Extract pickup location
+        pickup_match = re.search(r'\*\*Pick-Up\*\*\s*\n?\*\*([^*]+)\*\*', body, re.IGNORECASE | re.MULTILINE)
+        pickup = pickup_match.group(1).strip() if pickup_match else "Unknown Pickup"
+        
+        # Extract delivery location
+        delivery_match = re.search(r'\*\*Delivery\*\*\s*\n?\*\*([^*]+)\*\*', body, re.IGNORECASE | re.MULTILINE)
+        delivery = delivery_match.group(1).strip() if delivery_match else "Unknown Delivery"
+        
+        # Extract miles (looking for pattern like "2 STOPS, 156 MILES")
+        miles_match = re.search(r'\*\*.*?(\d+)\s+MILES\*\*', body, re.IGNORECASE)
+        miles = f"{miles_match.group(1)} miles" if miles_match else "Unknown Miles"
+        
+        # Extract vehicle type
+        vehicle_match = re.search(r'\*\*Vehicle required:\s*([^*]+)\*\*', body, re.IGNORECASE)
+        vehicle = vehicle_match.group(1).strip() if vehicle_match else "Unknown Vehicle"
+        
+        # Also check Load Type as backup
+        if vehicle == "Unknown Vehicle":
+            load_type_match = re.search(r'\*\*Load Type:\s*([^*]+)\*\*', body, re.IGNORECASE)
+            vehicle = load_type_match.group(1).strip() if load_type_match else "Unknown Vehicle"
+        
+        logger.info(f"📋 Parsed load: {pickup} → {delivery}, {miles}, {vehicle}")
+        
         return LoadData(
-            pickup="New York, NY",
-            delivery="Atlanta, GA",
-            miles="890 mi",
-            vehicle="Sprinter"
+            pickup=pickup,
+            delivery=delivery,
+            miles=miles,
+            vehicle=vehicle
         )
+        
     except Exception as e:
         logger.error(f"Error parsing email body: {e}")
-        return None
+        # Return a basic load data with available info
+        return LoadData(
+            pickup="Parse Error",
+            delivery="Parse Error", 
+            miles="Unknown",
+            vehicle="Unknown"
+        )
 
 def load_drivers() -> List[Driver]:
     drivers = []
@@ -146,28 +174,57 @@ def load_drivers() -> List[Driver]:
     return drivers
 
 def extract_zip_code(body: str) -> Optional[str]:
+    # Look for ZIP codes in pickup and delivery sections
     patterns = [
-        r'Pick[-\s]+Up\s+.*(\d{5})',
-        r'Pickup\s+.*(\d{5})',
-        r'Origin\s+.*(\d{5})',
-        r'\b(\d{5})\b'
+        r'\*\*Pick-Up\*\*\s*\n?\*\*[^,]+,\s*[A-Z]{2}\s+(\d{5})\*\*',  # Pickup ZIP
+        r'\*\*Delivery\*\*\s*\n?\*\*[^,]+,\s*[A-Z]{2}\s+(\d{5})\*\*',  # Delivery ZIP
+        r'\b(\d{5})\b'  # Any 5-digit number as fallback
     ]
+    
     for pattern in patterns:
-        match = re.search(pattern, body, re.IGNORECASE)
+        match = re.search(pattern, body, re.IGNORECASE | re.MULTILINE)
         if match:
-            return match.group(1)
+            zip_code = match.group(1)
+            logger.info(f"📍 Found ZIP code: {zip_code}")
+            return zip_code
+    
+    logger.warning("📍 No ZIP code found in email")
     return None
 
 def get_zip_coordinates(zip_code: str) -> Optional[Tuple[float, float]]:
+    # Expanded ZIP code mapping including Texas locations from your example
     zip_map = {
-        '30303': (33.755, -84.39),
-        '77001': (29.76, -95.36),
-        '75201': (32.78, -96.8),
-        '10001': (40.7128, -74.0060),
-        '90210': (34.0522, -118.2437),
-        '60601': (41.8781, -87.6298),
+        # Texas locations from your example
+        '78040': (27.5036, -99.5075),  # Laredo, TX
+        '78265': (29.3013, -98.2781),  # San Antonio, TX (far west side)
+        '78201': (29.4241, -98.4936),  # San Antonio, TX (downtown)
+        
+        # Other major cities
+        '30303': (33.755, -84.39),     # Atlanta, GA
+        '77001': (29.76, -95.36),      # Houston, TX
+        '75201': (32.78, -96.8),       # Dallas, TX
+        '10001': (40.7128, -74.0060),  # New York, NY
+        '90210': (34.0522, -118.2437), # Beverly Hills, CA
+        '60601': (41.8781, -87.6298),  # Chicago, IL
+        '44854': (41.0895, -82.6188),  # Norwalk, OH (added this one from your logs)
+        '33101': (25.7617, -80.1918),  # Miami, FL
+        '85001': (33.4484, -112.0740), # Phoenix, AZ
+        '98101': (47.6062, -122.3321), # Seattle, WA
+        '80201': (39.7392, -104.9903), # Denver, CO
+        '70112': (29.9511, -90.0715),  # New Orleans, LA
+        '37201': (36.1627, -86.7816),  # Nashville, TN
+        '28201': (35.2271, -80.8431),  # Charlotte, NC
+        '32801': (28.5383, -81.3792),  # Orlando, FL
+        '89101': (36.1699, -115.1398), # Las Vegas, NV
     }
-    return zip_map.get(zip_code)
+    
+    coords = zip_map.get(zip_code)
+    if coords:
+        logger.info(f"📍 Found coordinates for ZIP {zip_code}: {coords}")
+    else:
+        logger.warning(f"📍 Coordinates not found for ZIP {zip_code}")
+    
+    return coords
 
 def send_to_telegram(data: LoadData, chat_id: str = None):
     try:
@@ -226,53 +283,56 @@ def health():
 
 @app.route('/test-telegram', methods=['GET'])
 def test_telegram():
-    send_to_telegram(LoadData("Test Pickup", "Test Delivery", "123 mi", "Sprinter"))
-    return jsonify({"status": "sent"})
+    # Test with your actual email format
+    test_email = """**Pick-Up**
+**Laredo, TX 78040**
+Deliver Direct
+**Delivery**
+**San Antonio, TX 78265**
+Deliver Direct
+**2 STOPS, 156 MILES**
+**Broker Name: Terrance Crawford**
+**Broker Company: XPO LOGISTICS LLC**
+**Broker Phone: 855.744.7976**
+**Email: terrance.crawford@rxo.com**
+**Posted: 05/30/25 16:31 EST**
+**Expires: 05/30/25 16:59 EST**
+**Dock Level: No**
+**Hazmat: No**
+**Posted Amount: $0.00**
+**Load Type: Sprinter**
+**Vehicle required: CARGO VAN**
+**Pieces: 0**
+**Weight: 0 lbs**
+**Dimensions: 0L x 0W x 0H**
+**Stackable: No**
+**CSA/Fast Load: No**
+**Notes: **CALL DO NOT EMAIL 704.785.1944"""
+    
+    # Parse the test email
+    load_data = parse_email_body(test_email)
+    
+    # Send to Telegram
+    send_to_telegram(load_data)
+    
+    return jsonify({
+        "status": "test sent",
+        "parsed_data": load_data.to_dict() if load_data else None
+    })
 
 @app.route('/gmail-notify', methods=['POST'])
 def gmail_notify():
     logger.info("📩 Gmail notification received")
     try:
-        results = service.users().messages().list(userId='me', maxResults=1).execute()
-        messages = results.get('messages', [])
-        if not messages:
-            return jsonify({"status": "no messages"}), 200
-
-        msg_id = messages[0]['id']
-        message = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
-        body = extract_plain_text_from_message(message)
-
-        if not body:
-            return jsonify({"status": "empty body"}), 200
-
-        if any(word in body.upper() for word in ['SPRINTER', 'CARGO VAN', 'VAN']):
-            zip_code = extract_zip_code(body)
-            if not zip_code:
-                logger.warning("ZIP code not found.")
-                return jsonify({"status": "no zip"}), 200
-
-            coords = get_zip_coordinates(zip_code)
-            if not coords:
-                logger.warning(f"Coordinates not found for ZIP {zip_code}")
-                return jsonify({"status": "no coordinates"}), 200
-
-            drivers = load_drivers()
-            for driver in drivers:
-                distance = geodesic(coords, driver.coordinates).miles
-                if distance <= 150:
-                    send_to_telegram(parse_email_body(body), driver.id)
-                    logger.info(f"📤 Alert sent to driver {driver.id} ({distance:.1f} mi)")
-
-            send_to_telegram(parse_email_body(body))  # Also send to main group
-            return jsonify({"status": "alerts sent"}), 200
-
-        else:
-            logger.info("No relevant keywords in message.")
-            return jsonify({"status": "ignored"}), 200
-
-    except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        return jsonify({"error": str(e)}), 500
+        # Add retry logic for SSL errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                results = service.users().messages().list(userId='me', maxResults=1).execute()
+                break
+            except Exception as ssl_error:
+                if "SSL" in str(ssl_error) and attempt < max_retries - 1:
+                    logger.warning(f"SSL error on attempt {attempt + 1}, retrying...")
 
 # ========== MAIN ==========
 if __name__ == '__main__':
