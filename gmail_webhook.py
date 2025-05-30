@@ -59,7 +59,7 @@ class Driver:
 
 # ========== HELPER FUNCTIONS ==========
 def load_credentials():
-    token_file = 'token.json'
+    token_file = '/etc/secrets/token.json'
     if not os.path.exists(token_file):
         logger.error(f"token.json not found in: {os.getcwd()}")
         return None
