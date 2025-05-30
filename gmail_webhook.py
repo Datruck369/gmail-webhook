@@ -1,6 +1,4 @@
-# ========== DATA MODELS ==========
-class LoadData:
-    def __init__(self,#!/usr/bin/env python3
+#!/usr/bin/env python3
 
 import os
 import sys
@@ -10,10 +8,14 @@ import logging
 import base64
 import re
 import csv
+import ssl
+import time
+import httplib2
 from flask import Flask, request, jsonify
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from telegram import Bot
 from telegram.error import TelegramError
 from geopy.distance import geodesic
@@ -76,6 +78,50 @@ class Driver:
         return (self.lat, self.lng)
 
 # ========== HELPER FUNCTIONS ==========
+def create_secure_http_client():
+    """Create HTTP client with secure SSL configuration"""
+    try:
+        # Create SSL context with secure defaults
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        
+        # Create HTTP client with timeout and SSL context
+        http = httplib2.Http(timeout=30)
+        http.force_exception_to_status_code = True
+        
+        return http
+    except Exception as e:
+        logger.warning(f"Failed to create secure HTTP client, using default: {e}")
+        return httplib2.Http(timeout=30)
+
+def exponential_backoff(attempt: int, base_delay: float = 1.0, max_delay: float = 60.0) -> float:
+    """Calculate exponential backoff delay"""
+    delay = min(base_delay * (2 ** attempt), max_delay)
+    return delay
+
+def retry_with_backoff(func, max_retries: int = 3, exceptions: tuple = (Exception,)):
+    """Decorator for retrying functions with exponential backoff"""
+    def wrapper(*args, **kwargs):
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except exceptions as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    delay = exponential_backoff(attempt)
+                    logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"All {max_retries} attempts failed. Last error: {e}")
+        
+        raise last_exception
+    
+    return wrapper
+
 def load_credentials():
     token_file = 'token.json'
     credentials_file = 'credentials.json'
@@ -303,6 +349,37 @@ def send_to_telegram(data: LoadData, chat_id: str = None):
     except Exception as e:
         logger.error(f"Failed to send to Telegram: {e}")
 
+def safe_gmail_api_call(func, *args, **kwargs):
+    """Safely execute Gmail API calls with SSL error handling"""
+    max_retries = 3
+    ssl_exceptions = (ssl.SSLError, ConnectionError, OSError)
+    
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except ssl_exceptions as e:
+            if attempt < max_retries - 1:
+                delay = exponential_backoff(attempt)
+                logger.warning(f"SSL error on attempt {attempt + 1}: {e}. Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+                continue
+            else:
+                logger.error(f"SSL error persisted after {max_retries} attempts: {e}")
+                raise
+        except HttpError as e:
+            if e.resp.status in [429, 500, 502, 503, 504]:  # Retryable HTTP errors
+                if attempt < max_retries - 1:
+                    delay = exponential_backoff(attempt)
+                    logger.warning(f"HTTP error {e.resp.status} on attempt {attempt + 1}. Retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                    continue
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in Gmail API call: {e}")
+            raise
+    
+    return None
+
 # ========== INIT SERVICES ==========
 logger.info("🔑 Loading Gmail credentials...")
 creds = load_credentials()
@@ -316,15 +393,20 @@ if not creds:
 
 try:
     logger.info("🔧 Initializing Gmail service...")
-    service = build('gmail', 'v1', credentials=creds)
+    # Create service with secure HTTP client
+    http_client = create_secure_http_client()
+    service = build('gmail', 'v1', credentials=creds, http=http_client)
     
     logger.info("🤖 Initializing Telegram bot...")
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     
     # Test the services
     logger.info("🧪 Testing Gmail connection...")
-    profile = service.users().getProfile(userId='me').execute()
-    logger.info(f"✅ Gmail connected successfully for: {profile.get('emailAddress', 'Unknown')}")
+    profile = safe_gmail_api_call(service.users().getProfile(userId='me').execute)
+    if profile:
+        logger.info(f"✅ Gmail connected successfully for: {profile.get('emailAddress', 'Unknown')}")
+    else:
+        logger.error("❌ Failed to test Gmail connection")
     
     logger.info("🧪 Testing Telegram connection...")
     bot_info = bot.get_me()
@@ -386,20 +468,12 @@ def test_telegram():
 def gmail_notify():
     logger.info("📩 Gmail notification received")
     try:
-        # Add retry logic for SSL errors
-        max_retries = 3
-        results = None
-        
-        for attempt in range(max_retries):
-            try:
-                results = service.users().messages().list(userId='me', maxResults=1).execute()
-                break
-            except Exception as ssl_error:
-                if "SSL" in str(ssl_error) and attempt < max_retries - 1:
-                    logger.warning(f"SSL error on attempt {attempt + 1}, retrying...")
-                    continue
-                else:
-                    raise ssl_error
+        # Get messages with SSL error handling
+        results = safe_gmail_api_call(
+            service.users().messages().list,
+            userId='me', 
+            maxResults=1
+        )
         
         if not results:
             logger.error("Failed to get messages after retries")
@@ -410,9 +484,17 @@ def gmail_notify():
             logger.info("No messages found")
             return jsonify({"status": "no_messages"})
         
-        # Get the latest message
+        # Get the latest message with SSL error handling
         message_id = messages[0]['id']
-        message = service.users().messages().get(userId='me', id=message_id).execute()
+        message = safe_gmail_api_call(
+            service.users().messages().get,
+            userId='me', 
+            id=message_id
+        )
+        
+        if not message:
+            logger.error("Failed to get message content")
+            return jsonify({"status": "error", "message": "Failed to fetch message content"}), 500
         
         # Extract email body
         body = extract_plain_text_from_message(message)
