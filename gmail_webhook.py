@@ -59,19 +59,22 @@ class Driver:
 
 # ========== HELPER FUNCTIONS ==========
 def load_credentials():
-    token_file = '/etc/secrets/token.json'
+    token_file = 'token.json'
     if not os.path.exists(token_file):
-        logger.error(f"token.json not found in: {os.getcwd()}")
+        logger.error(f"❌ token.json not found at: {token_file}")
         return None
     try:
-        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+        with open(token_file, 'r') as f:
+            token_data = json.load(f)
+        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            with open(token_file, 'w') as token:
-                token.write(creds.to_json())
+            with open(token_file, 'w') as f:
+                f.write(creds.to_json())
+        logger.info("✅ Gmail credentials loaded successfully")
         return creds
     except Exception as e:
-        logger.error(f"Failed to load credentials: {e}")
+        logger.error(f"❌ Failed to load credentials: {e}")
         return None
 
 def extract_plain_text_from_message(message):
@@ -93,7 +96,6 @@ def extract_plain_text_from_message(message):
 
 def parse_email_body(body: str) -> Optional[LoadData]:
     try:
-        # Replace with actual parsing logic from email content
         return LoadData(
             pickup="New York, NY",
             delivery="Atlanta, GA",
