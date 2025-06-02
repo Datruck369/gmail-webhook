@@ -1,530 +1,389 @@
 #!/usr/bin/env python3
-
+"""
+Gmail webhook with proper email content extraction
+"""
 import os
 import sys
 import traceback
 import json
 import logging
-import base64
 import re
-import csv
-import ssl
-import time
-import httplib2
+import requests
 from flask import Flask, request, jsonify
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from telegram import Bot
-from telegram.error import TelegramError
-from geopy.distance import geodesic
-from typing import Dict, List, Optional, Tuple
+from bs4 import BeautifulSoup
+import base64
 
-# ========== CONFIGURATION ==========
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-TELEGRAM_BOT_TOKEN = '8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20'
-CHAT_ID = '5972776745'
+print("="*50)
+print("🚀 GMAIL WEBHOOK - UPDATED VERSION")
+print("="*50)
 
-# ========== LOGGING SETUP ==========
+# Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ========== FLASK APP INIT ==========
 app = Flask(__name__)
 
-# ========== DATA MODELS ==========
-class LoadData:
-    def __init__(self, pickup: str, pickup_date: str, delivery: str, delivery_date: str, 
-                 miles: str, vehicle: str, pieces: str = "N/A", weight: str = "N/A", 
-                 dimensions: str = "N/A", stackable: str = "N/A", notes: str = "N/A"):
-        self.pickup = pickup
-        self.pickup_date = pickup_date
-        self.delivery = delivery
-        self.delivery_date = delivery_date
-        self.miles = miles
-        self.vehicle = vehicle
-        self.pieces = pieces
-        self.weight = weight
-        self.dimensions = dimensions
-        self.stackable = stackable
-        self.notes = notes
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20')
+CHAT_ID = os.environ.get('CHAT_ID', '5972776745')  # You'll need to set this
 
-    def to_dict(self) -> Dict[str, str]:
-        return {
-            'pickup': self.pickup,
-            'pickup_date': self.pickup_date,
-            'delivery': self.delivery,
-            'delivery_date': self.delivery_date,
-            'miles': self.miles,
-            'vehicle': self.vehicle,
-            'pieces': self.pieces,
-            'weight': self.weight,
-            'dimensions': self.dimensions,
-            'stackable': self.stackable,
-            'notes': self.notes
-        }
+print(f"🤖 Telegram token configured: {'YES' if TELEGRAM_BOT_TOKEN else 'NO'}")
+print(f"💬 Chat ID configured: {'YES' if CHAT_ID else 'NO'}")
 
-class Driver:
-    def __init__(self, driver_id: str, truck: str, zip_code: str, lat: float, lng: float):
-        self.id = driver_id
-        self.truck = truck
-        self.zip = zip_code
-        self.lat = lat
-        self.lng = lng
-
-    @property
-    def coordinates(self) -> Tuple[float, float]:
-        return (self.lat, self.lng)
-
-# ========== HELPER FUNCTIONS ==========
-def create_secure_http_client():
-    """Create HTTP client with secure SSL configuration"""
-    try:
-        # Create SSL context with secure defaults
-        context = ssl.create_default_context()
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.check_hostname = True
-        context.verify_mode = ssl.CERT_REQUIRED
-        
-        # Create HTTP client with timeout and SSL context
-        http = httplib2.Http(timeout=30)
-        http.force_exception_to_status_code = True
-        
-        return http
-    except Exception as e:
-        logger.warning(f"Failed to create secure HTTP client, using default: {e}")
-        return httplib2.Http(timeout=30)
-
-def exponential_backoff(attempt: int, base_delay: float = 1.0, max_delay: float = 60.0) -> float:
-    """Calculate exponential backoff delay"""
-    delay = min(base_delay * (2 ** attempt), max_delay)
-    return delay
-
-def retry_with_backoff(func, max_retries: int = 3, exceptions: tuple = (Exception,)):
-    """Decorator for retrying functions with exponential backoff"""
-    def wrapper(*args, **kwargs):
-        last_exception = None
-        
-        for attempt in range(max_retries):
-            try:
-                return func(*args, **kwargs)
-            except exceptions as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    delay = exponential_backoff(attempt)
-                    logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay:.1f}s...")
-                    time.sleep(delay)
-                else:
-                    logger.error(f"All {max_retries} attempts failed. Last error: {e}")
-        
-        raise last_exception
+def extract_pickup_info(body):
+    """Extract pickup address and date/time from email body"""
+    # Pattern to match "Pick-Up" followed by address and then date/time or text
+    pickup_pattern = r'(?i)Pick[- ]?Up\s*[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)'
+    match = re.search(pickup_pattern, body)
     
-    return wrapper
+    if match:
+        pickup_address = match.group(1).strip()
+        pickup_date = match.group(2).strip()
+        return pickup_address, pickup_date
+    
+    # Fallback patterns for different formats
+    fallback_patterns = [
+        r'(?i)Pick[- ]?Up\s*[\r\n]+([^\r\n]+)',  # Just pickup address
+        r'(?i)Pickup Location[:\- ]+\s*([^\n]+)',
+        r'(?i)Pick[- ]?Up[:\- ]+\s*([^\n]+)',
+        r'(?i)Pickup[:\- ]+\s*([^\n]+)',
+        r'(?i)P/U[:\- ]+\s*([^\n]+)'
+    ]
+    
+    for pattern in fallback_patterns:
+        match = re.search(pattern, body)
+        if match:
+            return match.group(1).strip(), None
+    
+    return None, None
+
+def extract_delivery_info(body):
+    """Extract delivery address and date/time from email body"""
+    # Pattern to match "Delivery" followed by address and then date/time or text
+    delivery_pattern = r'(?i)Delivery\s*[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)'
+    match = re.search(delivery_pattern, body)
+    
+    if match:
+        delivery_address = match.group(1).strip()
+        delivery_info = match.group(2).strip()
+        
+        # Check if the second line looks like a date or is descriptive text
+        # If it contains digits and common date patterns, treat as date
+        # Otherwise, treat as delivery instructions
+        if re.search(r'\d{1,2}/\d{1,2}/\d{2,4}|\d{1,2}:\d{2}|ASAP|Direct', delivery_info, re.IGNORECASE):
+            return delivery_address, delivery_info
+        else:
+            # If second line doesn't look like date/time info, it might be part of address
+            # Try to get the third line
+            extended_pattern = r'(?i)Delivery\s*[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)'
+            extended_match = re.search(extended_pattern, body)
+            if extended_match:
+                full_address = f"{delivery_address} {match.group(2).strip()}"
+                delivery_date = extended_match.group(3).strip()
+                return full_address, delivery_date
+            else:
+                return delivery_address, delivery_info
+    
+    # Fallback patterns for different formats
+    fallback_patterns = [
+        r'(?i)Delivery\s*[\r\n]+([^\r\n]+)',  # Just delivery address
+        r'(?i)Deliver to[:\- ]+\s*([^\n]+)',  # "Deliver to:" format
+        r'(?i)Delivery Location[:\- ]+\s*([^\n]+)',  # "Delivery Location:" format
+    ]
+    
+    for pattern in fallback_patterns:
+        match = re.search(pattern, body)
+        if match:
+            return match.group(1).strip(), None
+    
+    return None, None
+
+def extract_clean_body_from_gmail(service, message_id):
+    """Extract clean text body from Gmail message"""
+    try:
+        message = service.users().messages().get(userId='me', id=message_id, format='full').execute()
+        payload = message['payload']
+        
+        def extract_text_from_payload(payload):
+            body = ""
+            if 'parts' in payload:
+                for part in payload['parts']:
+                    if part['mimeType'] == 'text/plain':
+                        data = part['body']['data']
+                        body = base64.urlsafe_b64decode(data).decode('utf-8')
+                        break
+                    elif part['mimeType'] == 'text/html':
+                        data = part['body']['data']
+                        html = base64.urlsafe_b64decode(data).decode('utf-8')
+                        soup = BeautifulSoup(html, 'html.parser')
+                        body = soup.get_text()
+                        break
+                    elif 'parts' in part:
+                        body = extract_text_from_payload(part)
+                        if body:
+                            break
+            else:
+                if payload['mimeType'] == 'text/plain':
+                    data = payload['body']['data']
+                    body = base64.urlsafe_b64decode(data).decode('utf-8')
+                elif payload['mimeType'] == 'text/html':
+                    data = payload['body']['data']
+                    html = base64.urlsafe_b64decode(data).decode('utf-8')
+                    soup = BeautifulSoup(html, 'html.parser')
+                    body = soup.get_text()
+            
+            return body
+        
+        return extract_text_from_payload(payload)
+    
+    except Exception as e:
+        logger.error(f"Error extracting email body: {e}")
+        return ""
+
+def build_formatted_message(body: str) -> str:
+    """Build formatted message from email body"""
+    def find(pattern, default="N/A"):
+        match = re.search(pattern, body, re.IGNORECASE)
+        return match.group(1).strip() if match else default
+
+    # Use the pickup and delivery extraction functions
+    pickup_address, pickup_date = extract_pickup_info(body)
+    if not pickup_address:
+        pickup_address = "Unknown Pickup"
+    if not pickup_date:
+        pickup_date = "ASAP"
+    
+    delivery_address, delivery_date = extract_delivery_info(body)
+    if not delivery_address:
+        delivery_address = "Unknown Delivery"
+    if not delivery_date:
+        delivery_date = "N/A"
+    
+    # Extract other information
+    stops_miles = find(r'(\d+ STOPS?,\s*[0-9,]+ MILES)', "")
+    estimated_miles = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)\s*MILES', stops_miles)
+    estimated_miles = estimated_miles.group(1) if estimated_miles else "N/A"
+    
+    pieces = find(r'Pieces:\s*(.*)', "N/A")
+    weight = find(r'Weight:\s*(.*)', "N/A")
+    dims = find(r'Dimensions:\s*(.*)', "N/A")
+    stackable = find(r'Stackable:\s*(.*)', "N/A")
+    truck_size = find(r'Vehicle required:\s*(.*)', "N/A")
+    notes = find(r'Notes:\s*(.*)', "N/A")
+    broker_name = find(r'Broker Name:\s*(.*)', "N/A")
+    broker_company = find(r'Broker Company:\s*(.*)', "N/A")
+    broker_phone = find(r'Broker Phone:\s*(.*)', "N/A")
+    posted_amount = find(r'Posted Amount:\s*(.*)', "N/A")
+
+    message = f"""📦 **New Load Alert!**
+
+📍 **Pick-up:** {pickup_address}
+📅 **Pick-up date (EST):** {pickup_date}
+
+🏁 **Deliver to:** {delivery_address}
+📅 **Deliver date (EST):** {delivery_date}
+
+🛣️ **Estimated Miles:** {estimated_miles}
+🚚 **Suggested Truck Size:** {truck_size}
+💰 **Posted Amount:** {posted_amount}
+
+📦 **Pieces:** {pieces}
+⚖️ **Weight:** {weight}
+📏 **Dims:** {dims}
+📚 **Stackable:** {stackable}
+
+👨‍💼 **Broker:** {broker_name}
+🏢 **Company:** {broker_company}
+📞 **Phone:** {broker_phone}
+
+📝 **Notes:** {notes}"""
+
+    return message
+
+def send_telegram_message(message):
+    """Send message to Telegram"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {
+            "chat_id": CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        response = requests.post(url, data=data)
+        logger.info(f"Telegram response: {response.status_code}")
+        return response.status_code == 200
+    except Exception as e:
+        logger.error(f"Error sending Telegram message: {e}")
+        return False
 
 def load_credentials():
+    """Load credentials from token.json"""
     token_file = 'token.json'
-    credentials_file = 'credentials.json'
     
     if not os.path.exists(token_file):
-        logger.error(f"token.json not found in {os.getcwd()}")
-        logger.info("You need to run the OAuth flow first. Create a credentials.json file from Google Cloud Console.")
+        logger.error(f"❌ {token_file} not found!")
         return None
     
     try:
         creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+        logger.info("✅ Successfully loaded credentials from token.json")
         
-        # Check if credentials are valid
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                logger.info("Token expired, attempting to refresh...")
-                try:
-                    # Create a secure request object
-                    request = Request()
-                    creds.refresh(request)
-                    # Save the refreshed token
-                    with open(token_file, 'w') as token:
-                        token.write(creds.to_json())
-                    logger.info("✅ Token refreshed successfully")
-                except Exception as refresh_error:
-                    logger.error(f"Failed to refresh token: {refresh_error}")
-                    logger.error("You may need to re-run the OAuth flow")
-                    return None
-            else:
-                logger.error("Invalid credentials - no refresh token available")
-                logger.error("You need to delete token.json and run the OAuth flow again")
-                return None
+        # Refresh if needed
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            # Save the refreshed credentials
+            with open(token_file, 'w') as token:
+                token.write(creds.to_json())
         
         return creds
-        
     except Exception as e:
-        logger.error(f"Failed to load credentials: {e}")
-        logger.error("Try deleting token.json and running the OAuth flow again")
+        logger.error(f"❌ Error loading credentials: {e}")
         return None
 
-def extract_plain_text_from_message(message):
-    try:
-        payload = message.get('payload', {})
-        parts = payload.get('parts', [payload])
-        for part in parts:
-            if part.get('mimeType') == 'text/plain':
-                body_data = part.get('body', {}).get('data')
-                if body_data:
-                    return base64.urlsafe_b64decode(body_data).decode('utf-8')
-        body_data = payload.get('body', {}).get('data')
-        if body_data:
-            return base64.urlsafe_b64decode(body_data).decode('utf-8')
-        return None
-    except Exception as e:
-        logger.error(f"Failed to extract body: {e}")
-        return None
-
-def parse_email_body(body: str) -> Optional[LoadData]:
-    try:
-        # Log the raw email body for debugging
-        logger.info(f"📧 Raw email body preview: {body[:500]}...")
-        
-        # Extract pickup location (after **Pick-Up**)
-        pickup_match = re.search(r'\*\*Pick-Up\*\*\s*\n\*\*([^*]+)\*\*', body, re.IGNORECASE | re.MULTILINE)
-        pickup = pickup_match.group(1).strip() if pickup_match else "Unknown Pickup"
-        
-        # Extract pickup date (line after pickup location)
-        pickup_date_match = re.search(r'\*\*Pick-Up\*\*\s*\n\*\*[^*]+\*\*\s*\n([^\n]+)', body, re.IGNORECASE | re.MULTILINE)
-        pickup_date = pickup_date_match.group(1).strip() if pickup_date_match else "N/A"
-        
-        # Extract delivery location (after **Delivery**)
-        delivery_match = re.search(r'\*\*Delivery\*\*\s*\n\*\*([^*]+)\*\*', body, re.IGNORECASE | re.MULTILINE)
-        delivery = delivery_match.group(1).strip() if delivery_match else "Unknown Delivery"
-        
-        # Extract delivery date (line after delivery location)
-        delivery_date_match = re.search(r'\*\*Delivery\*\*\s*\n\*\*[^*]+\*\*\s*\n([^\n]+)', body, re.IGNORECASE | re.MULTILINE)
-        delivery_date = delivery_date_match.group(1).strip() if delivery_date_match else "N/A"
-        
-        # Extract miles (pattern like "2 STOPS, 1,269 MILES")
-        miles_match = re.search(r'\*\*.*?(\d{1,3}(?:,\d{3})*)\s+MILES\*\*', body, re.IGNORECASE)
-        miles = miles_match.group(1) if miles_match else "N/A"
-        
-        # Extract vehicle type
-        vehicle_match = re.search(r'\*\*Vehicle required:\s*([^*]+)\*\*', body, re.IGNORECASE)
-        vehicle = vehicle_match.group(1).strip() if vehicle_match else "N/A"
-        
-        # Extract pieces
-        pieces_match = re.search(r'\*\*Pieces:\s*([^*]+)\*\*', body, re.IGNORECASE)
-        pieces = pieces_match.group(1).strip() if pieces_match else "N/A"
-        
-        # Extract weight
-        weight_match = re.search(r'\*\*Weight:\s*([^*]+)\*\*', body, re.IGNORECASE)
-        weight = weight_match.group(1).strip() if weight_match else "N/A"
-        
-        # Extract dimensions
-        dimensions_match = re.search(r'\*\*Dimensions:\s*([^*]+)\*\*', body, re.IGNORECASE)
-        dimensions = dimensions_match.group(1).strip() if dimensions_match else "N/A"
-        
-        # Extract stackable
-        stackable_match = re.search(r'\*\*Stackable:\s*([^*]+)\*\*', body, re.IGNORECASE)
-        stackable = stackable_match.group(1).strip() if stackable_match else "N/A"
-        
-        # Extract notes (everything after **Notes: **)
-        notes_match = re.search(r'\*\*Notes:\s*\*\*([^*]*(?:\*(?!\*)[^*]*)*)', body, re.IGNORECASE | re.DOTALL)
-        notes = notes_match.group(1).strip() if notes_match else "N/A"
-        
-        logger.info(f"📋 Parsed load: {pickup} → {delivery}, {miles} miles, {vehicle}")
-        
-        return LoadData(
-            pickup=pickup,
-            pickup_date=pickup_date,
-            delivery=delivery,
-            delivery_date=delivery_date,
-            miles=miles,
-            vehicle=vehicle,
-            pieces=pieces,
-            weight=weight,
-            dimensions=dimensions,
-            stackable=stackable,
-            notes=notes
-        )
-        
-    except Exception as e:
-        logger.error(f"Error parsing email body: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        # Return a basic load data with available info
-        return LoadData(
-            pickup="Parse Error",
-            pickup_date="N/A",
-            delivery="Parse Error", 
-            delivery_date="N/A",
-            miles="N/A",
-            vehicle="N/A"
-        )
-
-def load_drivers() -> List[Driver]:
-    drivers = []
-    try:
-        with open('drivers.csv', newline='', encoding='utf-8') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                drivers.append(Driver(
-                    driver_id=row['id'],
-                    truck=row['truck'],
-                    zip_code=row['zip'],
-                    lat=float(row['lat']),
-                    lng=float(row['lng'])
-                ))
-        logger.info(f"Loaded {len(drivers)} drivers from CSV")
-    except Exception as e:
-        logger.error(f"Error loading drivers.csv: {e}")
-    return drivers
-
-def extract_zip_code(body: str) -> Optional[str]:
-    # Look for ZIP codes in pickup and delivery sections
-    patterns = [
-        r'\*\*Pick-Up\*\*\s*\n?\*\*[^,]+,\s*[A-Z]{2}\s+(\d{5})\*\*',  # Pickup ZIP
-        r'\*\*Delivery\*\*\s*\n?\*\*[^,]+,\s*[A-Z]{2}\s+(\d{5})\*\*',  # Delivery ZIP
-        r'\b(\d{5})\b'  # Any 5-digit number as fallback
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, body, re.IGNORECASE | re.MULTILINE)
-        if match:
-            zip_code = match.group(1)
-            logger.info(f"📍 Found ZIP code: {zip_code}")
-            return zip_code
-    
-    logger.warning("📍 No ZIP code found in email")
-    return None
-
-def get_zip_coordinates(zip_code: str) -> Optional[Tuple[float, float]]:
-    # Expanded ZIP code mapping including Texas locations from your example
-    zip_map = {
-        # Texas locations from your example
-        '78040': (27.5036, -99.5075),  # Laredo, TX
-        '78265': (29.3013, -98.2781),  # San Antonio, TX (far west side)
-        '78201': (29.4241, -98.4936),  # San Antonio, TX (downtown)
-        
-        # Other major cities
-        '30303': (33.755, -84.39),     # Atlanta, GA
-        '77001': (29.76, -95.36),      # Houston, TX
-        '75201': (32.78, -96.8),       # Dallas, TX
-        '10001': (40.7128, -74.0060),  # New York, NY
-        '90210': (34.0522, -118.2437), # Beverly Hills, CA
-        '60601': (41.8781, -87.6298),  # Chicago, IL
-        '44854': (41.0895, -82.6188),  # Norwalk, OH (added this one from your logs)
-        '33101': (25.7617, -80.1918),  # Miami, FL
-        '85001': (33.4484, -112.0740), # Phoenix, AZ
-        '98101': (47.6062, -122.3321), # Seattle, WA
-        '80201': (39.7392, -104.9903), # Denver, CO
-        '70112': (29.9511, -90.0715),  # New Orleans, LA
-        '37201': (36.1627, -86.7816),  # Nashville, TN
-        '28201': (35.2271, -80.8431),  # Charlotte, NC
-        '32801': (28.5383, -81.3792),  # Orlando, FL
-        '89101': (36.1699, -115.1398), # Las Vegas, NV
-    }
-    
-    coords = zip_map.get(zip_code)
-    if coords:
-        logger.info(f"📍 Found coordinates for ZIP {zip_code}: {coords}")
-    else:
-        logger.warning(f"📍 Coordinates not found for ZIP {zip_code}")
-    
-    return coords
-
-def send_to_telegram(data: LoadData, chat_id: str = None):
-    try:
-        text = (
-            f"📦 *New Load Alert!*\n\n"
-            f"📍 *Pick-up:* {data.pickup}\n"
-            f"📅 *Pick-up date (EST):* {data.pickup_date}\n"
-            f"🏁 *Deliver to:* {data.delivery}\n"
-            f"📅 *Deliver date (EST):* {data.delivery_date}\n"
-            f"🛣️ *Estimated Miles:* {data.miles}\n"
-            f"🚚 *Suggested Truck Size:* {data.vehicle}\n"
-            f"📦 *Pieces:* {data.pieces}\n"
-            f"⚖️ *Weight:* {data.weight}\n"
-            f"📏 *Dims:* {data.dimensions}\n"
-            f"📚 *Stackable:* {data.stackable}\n"
-            f"📝 *Notes:* {data.notes}"
-        )
-        bot.send_message(chat_id=chat_id or CHAT_ID, text=text, parse_mode='Markdown')
-        logger.info("✅ Message sent to Telegram successfully")
-    except TelegramError as e:
-        logger.error(f"Telegram error: {e}")
-    except Exception as e:
-        logger.error(f"Failed to send to Telegram: {e}")
-
-def safe_gmail_api_call(api_method, **kwargs):
-    """Safely execute Gmail API calls with SSL error handling"""
-    max_retries = 3
-    ssl_exceptions = (ssl.SSLError, ConnectionError, OSError)
-    
-    for attempt in range(max_retries):
-        try:
-            return api_method(**kwargs).execute()
-        except ssl_exceptions as e:
-            if attempt < max_retries - 1:
-                delay = exponential_backoff(attempt)
-                logger.warning(f"SSL error on attempt {attempt + 1}: {e}. Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-                continue
-            else:
-                logger.error(f"SSL error persisted after {max_retries} attempts: {e}")
-                raise
-        except HttpError as e:
-            if e.resp.status in [429, 500, 502, 503, 504]:  # Retryable HTTP errors
-                if attempt < max_retries - 1:
-                    delay = exponential_backoff(attempt)
-                    logger.warning(f"HTTP error {e.resp.status} on attempt {attempt + 1}. Retrying in {delay:.1f}s...")
-                    time.sleep(delay)
-                    continue
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error in Gmail API call: {e}")
-            raise
-    
-    return None
-
-# ========== INIT SERVICES ==========
-logger.info("🔑 Loading Gmail credentials...")
+# Initialize Gmail service
+logger.info("🚀 Attempting to load credentials...")
 creds = load_credentials()
+
 if not creds:
-    logger.error("❌ Unable to load credentials. Please check your OAuth setup.")
-    logger.error("Steps to fix:")
-    logger.error("1. Ensure you have credentials.json from Google Cloud Console")
-    logger.error("2. Delete token.json if it exists")
-    logger.error("3. Run OAuth flow to generate new token.json")
+    logger.error("❌ Failed to load credentials")
+    print("❌ CREDENTIALS LOADING FAILED")
     sys.exit(1)
 
 try:
-    logger.info("🔧 Initializing Gmail service...")
-    # Initialize Gmail service (credentials handle HTTP client internally)
     service = build('gmail', 'v1', credentials=creds)
-    
-    logger.info("🤖 Initializing Telegram bot...")
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    
-    # Test the services
-    logger.info("🧪 Testing Gmail connection...")
-    profile = safe_gmail_api_call(service.users().getProfile, userId='me')
-    if profile:
-        logger.info(f"✅ Gmail connected successfully for: {profile.get('emailAddress', 'Unknown')}")
-    else:
-        logger.error("❌ Failed to test Gmail connection")
-    
-    logger.info("🧪 Testing Telegram connection...")
-    bot_info = bot.get_me()
-    logger.info(f"✅ Telegram bot connected successfully: @{bot_info.username}")
-    
+    logger.info("✅ Gmail service created successfully")
 except Exception as e:
-    logger.error(f"❌ Service initialization failed: {e}")
-    logger.error("This could be due to:")
-    logger.error("1. Invalid or expired OAuth token")
-    logger.error("2. Invalid Telegram bot token") 
-    logger.error("3. Network connectivity issues")
+    logger.error(f"❌ Error building Gmail service: {e}")
+    print(f"❌ GMAIL SERVICE FAILED: {e}")
     sys.exit(1)
 
-# ========== FLASK ROUTES ==========
-@app.route('/', methods=['GET'])
-def health():
-    return jsonify({"status": "running", "token.json": os.path.exists('token.json')})
-
-@app.route('/test-telegram', methods=['GET'])
-def test_telegram():
-    # Test with your actual email format
-    test_email = """**Pick-Up**
-**Lenexa, KS 66215**
-06/02/25 09:00 EST
-**Delivery**
-**Tampa, FL 33618**
-06/04/25 08:00 EST
-**2 STOPS, 1,269 MILES**
-**Broker Name: Mark Stack**
-**Broker Company: Express Logistics LLC**
-**Broker Phone: 814.454.4373**
-**Email: mark.stack@expressfamily.com**
-**Posted: 05/30/25 16:44 EST**
-**Expires: 05/30/25 17:12 EST**
-**Dock Level: No**
-**Hazmat: No**
-**Posted Amount: $0.00**
-**Load Type: Expedited Load**
-**Vehicle required: SPRINTER**
-**Pieces: 1**
-**Weight: 245 lbs**
-**Dimensions: 99L x 49W x 18H**
-**Stackable: No**
-**CSA/Fast Load: No**
-**Notes: **EMAIL ONLY - *Driver needs to open the boxes on the pallet and hand carry the individual pieces into the store at delivery* these are not heavy. they are signs"""
-    
-    # Parse the test email
-    load_data = parse_email_body(test_email)
-    
-    # Send to Telegram
-    send_to_telegram(load_data)
-    
+@app.route("/", methods=["GET"])
+def home():
     return jsonify({
-        "status": "test sent",
-        "parsed_data": load_data.to_dict() if load_data else None
+        "status": "running",
+        "version": "updated-version",
+        "message": "Gmail webhook with proper email extraction is running"
     })
 
-@app.route('/gmail-notify', methods=['POST'])
-def gmail_notify():
-    logger.info("📩 Gmail notification received")
+@app.route("/test-gmail", methods=["GET"])
+def test_gmail():
     try:
-        # Get messages with SSL error handling
-        results = safe_gmail_api_call(
-            service.users().messages().list,
-            userId='me', 
-            maxResults=1
-        )
-        
-        if not results:
-            logger.error("Failed to get messages after retries")
-            return jsonify({"status": "error", "message": "Failed to fetch messages"}), 500
-            
+        profile = service.users().getProfile(userId='me').execute()
+        return jsonify({
+            "status": "success",
+            "email": profile.get('emailAddress'),
+            "message": "Gmail API is working!"
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route("/test-latest-email", methods=["GET"])
+def test_latest_email():
+    """Test endpoint to process the latest email"""
+    try:
+        # Get the latest email from Sprinter label
+        results = service.users().messages().list(userId='me', labelIds=['Label_1'], maxResults=1).execute()
         messages = results.get('messages', [])
+        
         if not messages:
-            logger.info("No messages found")
-            return jsonify({"status": "no_messages"})
+            return jsonify({
+                "status": "no_messages",
+                "message": "No messages found in Sprinter label"
+            })
         
-        # Get the latest message with SSL error handling
         message_id = messages[0]['id']
-        message = safe_gmail_api_call(
-            service.users().messages().get,
-            userId='me', 
-            id=message_id
-        )
-        
-        if not message:
-            logger.error("Failed to get message content")
-            return jsonify({"status": "error", "message": "Failed to fetch message content"}), 500
+        logger.info(f"Processing latest email with ID: {message_id}")
         
         # Extract email body
-        body = extract_plain_text_from_message(message)
-        if not body:
-            logger.warning("Could not extract email body")
-            return jsonify({"status": "no_body"})
+        body = extract_clean_body_from_gmail(service, message_id)
+        logger.info(f"Extracted body length: {len(body)}")
         
-        # Parse the load data
-        load_data = parse_email_body(body)
-        if load_data:
-            # Send to Telegram
-            send_to_telegram(load_data)
-            logger.info("✅ Load data sent to Telegram")
-            
-            return jsonify({
-                "status": "success",
-                "message": "Load data processed and sent to Telegram",
-                "data": load_data.to_dict()
-            })
-        else:
-            logger.warning("Failed to parse load data")
-            return jsonify({"status": "parse_error"})
-            
+        # Build formatted message
+        formatted_message = build_formatted_message(body)
+        
+        # Send to Telegram
+        success = send_telegram_message(formatted_message)
+        
+        return jsonify({
+            "status": "success" if success else "telegram_error",
+            "message": "Email processed and sent to Telegram" if success else "Email processed but Telegram failed",
+            "formatted_message": formatted_message,
+            "body_preview": body[:500] + "..." if len(body) > 500 else body
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in test_latest_email: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+@app.route("/gmail-notify", methods=["POST"])
+def gmail_notify():
+    """Handle Gmail webhook notifications"""
+    try:
+        logger.info("📩 Gmail notification received")
+        
+        # Get notification data
+        notification_data = request.get_json()
+        logger.info(f"Notification data: {notification_data}")
+        
+        # Decode the message data
+        if 'message' in notification_data:
+            message_data = notification_data['message']
+            if 'data' in message_data:
+                # Decode base64 data
+                decoded_data = base64.b64decode(message_data['data']).decode('utf-8')
+                pub_sub_data = json.loads(decoded_data)
+                logger.info(f"Decoded pub/sub data: {pub_sub_data}")
+                
+                # Get the history ID to fetch new messages
+                history_id = pub_sub_data.get('historyId')
+                if history_id:
+                    # Get recent messages from Sprinter label
+                    results = service.users().messages().list(
+                        userId='me', 
+                        labelIds=['Label_1'],  # Sprinter label
+                        maxResults=5
+                    ).execute()
+                    messages = results.get('messages', [])
+                    
+                    for msg in messages:
+                        message_id = msg['id']
+                        logger.info(f"Processing message ID: {message_id}")
+                        
+                        # Extract email body
+                        body = extract_clean_body_from_gmail(service, message_id)
+                        
+                        if body and len(body) > 100:  # Only process emails with substantial content
+                            # Build formatted message
+                            formatted_message = build_formatted_message(body)
+                            
+                            # Send to Telegram
+                            success = send_telegram_message(formatted_message)
+                            logger.info(f"Telegram message sent: {success}")
+                            
+                            # Only process the first new email to avoid spam
+                            break
+        
+        return jsonify({"status": "processed"}), 200
+        
     except Exception as e:
         logger.error(f"Error processing Gmail notification: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
 
-# ========== MAIN ==========
-if __name__ == '__main__':
-    logger.info("🚀 Starting Gmail Webhook Bot")
-    app.run(host='0.0.0.0', port=8080)
+if __name__ == "__main__":
+    print("🎯 Starting Flask application...")
+    logger.info("🚀 Updated Gmail Webhook Starting")
+    app.run(host="0.0.0.0", port=8080, debug=False)
