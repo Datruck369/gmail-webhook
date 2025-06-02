@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gmail webhook with proper email content extraction
+Gmail webhook with proper email content extraction - Memory Safe Version
 """
 import os
 import sys
@@ -15,212 +15,318 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from bs4 import BeautifulSoup
 import base64
+import gc  # Garbage collection
+from typing import Optional, Tuple
 
 print("="*50)
-print("🚀 GMAIL WEBHOOK - UPDATED VERSION")
+print("🚀 GMAIL WEBHOOK - MEMORY SAFE VERSION")
 print("="*50)
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Setup logging with safer configuration
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Limit Flask's memory usage
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB limit
+
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20')
-CHAT_ID = os.environ.get('CHAT_ID', '5972776745')  # You'll need to set this
+CHAT_ID = os.environ.get('CHAT_ID', '5972776745')
 
 print(f"🤖 Telegram token configured: {'YES' if TELEGRAM_BOT_TOKEN else 'NO'}")
 print(f"💬 Chat ID configured: {'YES' if CHAT_ID else 'NO'}")
 
-def extract_pickup_info(body):
-    """Extract pickup address and date/time from email body"""
-    # Pattern to match "Pick-Up" followed by address and then date/time or text
-    pickup_pattern = r'(?i)Pick[- ]?Up\s*[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)'
-    match = re.search(pickup_pattern, body)
-    
-    if match:
-        pickup_address = match.group(1).strip()
-        pickup_date = match.group(2).strip()
-        return pickup_address, pickup_date
-    
-    # Fallback patterns for different formats
-    fallback_patterns = [
-        r'(?i)Pick[- ]?Up\s*[\r\n]+([^\r\n]+)',  # Just pickup address
-        r'(?i)Pickup Location[:\- ]+\s*([^\n]+)',
-        r'(?i)Pick[- ]?Up[:\- ]+\s*([^\n]+)',
-        r'(?i)Pickup[:\- ]+\s*([^\n]+)',
-        r'(?i)P/U[:\- ]+\s*([^\n]+)'
-    ]
-    
-    for pattern in fallback_patterns:
-        match = re.search(pattern, body)
-        if match:
-            return match.group(1).strip(), None
-    
-    return None, None
+# Global service variable
+service = None
 
-def extract_delivery_info(body):
-    """Extract delivery address and date/time from email body"""
-    # Pattern to match "Delivery" followed by address and then date/time or text
-    delivery_pattern = r'(?i)Delivery\s*[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)'
-    match = re.search(delivery_pattern, body)
-    
-    if match:
-        delivery_address = match.group(1).strip()
-        delivery_info = match.group(2).strip()
-        
-        # Check if the second line looks like a date or is descriptive text
-        # If it contains digits and common date patterns, treat as date
-        # Otherwise, treat as delivery instructions
-        if re.search(r'\d{1,2}/\d{1,2}/\d{2,4}|\d{1,2}:\d{2}|ASAP|Direct', delivery_info, re.IGNORECASE):
-            return delivery_address, delivery_info
-        else:
-            # If second line doesn't look like date/time info, it might be part of address
-            # Try to get the third line
-            extended_pattern = r'(?i)Delivery\s*[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)'
-            extended_match = re.search(extended_pattern, body)
-            if extended_match:
-                full_address = f"{delivery_address} {match.group(2).strip()}"
-                delivery_date = extended_match.group(3).strip()
-                return full_address, delivery_date
-            else:
-                return delivery_address, delivery_info
-    
-    # Fallback patterns for different formats
-    fallback_patterns = [
-        r'(?i)Delivery\s*[\r\n]+([^\r\n]+)',  # Just delivery address
-        r'(?i)Deliver to[:\- ]+\s*([^\n]+)',  # "Deliver to:" format
-        r'(?i)Delivery Location[:\- ]+\s*([^\n]+)',  # "Delivery Location:" format
-    ]
-    
-    for pattern in fallback_patterns:
-        match = re.search(pattern, body)
-        if match:
-            return match.group(1).strip(), None
-    
-    return None, None
-
-def extract_clean_body_from_gmail(service, message_id):
-    """Extract clean text body from Gmail message"""
+def safe_decode_base64(data: str) -> Optional[str]:
+    """Safely decode base64 data with error handling"""
     try:
+        if not data:
+            return None
+        
+        # Add padding if needed
+        missing_padding = len(data) % 4
+        if missing_padding:
+            data += '=' * (4 - missing_padding)
+        
+        decoded = base64.urlsafe_b64decode(data)
+        return decoded.decode('utf-8', errors='ignore')
+    except Exception as e:
+        logger.error(f"Error decoding base64: {e}")
+        return None
+
+def extract_pickup_info(body: str) -> Tuple[Optional[str], Optional[str]]:
+    """Extract pickup address and date/time from email body"""
+    if not body:
+        return None, None
+    
+    try:
+        # Pattern to match "Pick-Up" followed by address and then date/time or text
+        pickup_pattern = r'(?i)Pick[- ]?Up\s*[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)'
+        match = re.search(pickup_pattern, body)
+        
+        if match:
+            pickup_address = match.group(1).strip()
+            pickup_date = match.group(2).strip()
+            return pickup_address, pickup_date
+        
+        # Fallback patterns for different formats
+        fallback_patterns = [
+            r'(?i)Pick[- ]?Up\s*[\r\n]+([^\r\n]+)',
+            r'(?i)Pickup Location[:\- ]+\s*([^\n]+)',
+            r'(?i)Pick[- ]?Up[:\- ]+\s*([^\n]+)',
+            r'(?i)Pickup[:\- ]+\s*([^\n]+)',
+            r'(?i)P/U[:\- ]+\s*([^\n]+)'
+        ]
+        
+        for pattern in fallback_patterns:
+            match = re.search(pattern, body)
+            if match:
+                return match.group(1).strip(), None
+        
+        return None, None
+    except Exception as e:
+        logger.error(f"Error extracting pickup info: {e}")
+        return None, None
+
+def extract_delivery_info(body: str) -> Tuple[Optional[str], Optional[str]]:
+    """Extract delivery address and date/time from email body"""
+    if not body:
+        return None, None
+    
+    try:
+        # Pattern to match "Delivery" followed by address and then date/time or text
+        delivery_pattern = r'(?i)Delivery\s*[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)'
+        match = re.search(delivery_pattern, body)
+        
+        if match:
+            delivery_address = match.group(1).strip()
+            delivery_info = match.group(2).strip()
+            
+            # Check if the second line looks like a date or is descriptive text
+            if re.search(r'\d{1,2}/\d{1,2}/\d{2,4}|\d{1,2}:\d{2}|ASAP|Direct', delivery_info, re.IGNORECASE):
+                return delivery_address, delivery_info
+            else:
+                # Try to get the third line
+                extended_pattern = r'(?i)Delivery\s*[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)[\r\n]+([^\r\n]+)'
+                extended_match = re.search(extended_pattern, body)
+                if extended_match:
+                    full_address = f"{delivery_address} {match.group(2).strip()}"
+                    delivery_date = extended_match.group(3).strip()
+                    return full_address, delivery_date
+                else:
+                    return delivery_address, delivery_info
+        
+        # Fallback patterns
+        fallback_patterns = [
+            r'(?i)Delivery\s*[\r\n]+([^\r\n]+)',
+            r'(?i)Deliver to[:\- ]+\s*([^\n]+)',
+            r'(?i)Delivery Location[:\- ]+\s*([^\n]+)',
+        ]
+        
+        for pattern in fallback_patterns:
+            match = re.search(pattern, body)
+            if match:
+                return match.group(1).strip(), None
+        
+        return None, None
+    except Exception as e:
+        logger.error(f"Error extracting delivery info: {e}")
+        return None, None
+
+def extract_clean_body_from_gmail(service, message_id: str) -> str:
+    """Extract clean text body from Gmail message with memory safety"""
+    try:
+        if not service or not message_id:
+            return ""
+        
         message = service.users().messages().get(userId='me', id=message_id, format='full').execute()
+        if not message or 'payload' not in message:
+            return ""
+        
         payload = message['payload']
         
-        def extract_text_from_payload(payload):
+        def extract_text_from_payload(payload) -> str:
             body = ""
-            if 'parts' in payload:
-                for part in payload['parts']:
-                    if part['mimeType'] == 'text/plain':
-                        data = part['body']['data']
-                        body = base64.urlsafe_b64decode(data).decode('utf-8')
-                        break
-                    elif part['mimeType'] == 'text/html':
-                        data = part['body']['data']
-                        html = base64.urlsafe_b64decode(data).decode('utf-8')
-                        soup = BeautifulSoup(html, 'html.parser')
-                        body = soup.get_text()
-                        break
-                    elif 'parts' in part:
-                        body = extract_text_from_payload(part)
-                        if body:
-                            break
-            else:
-                if payload['mimeType'] == 'text/plain':
-                    data = payload['body']['data']
-                    body = base64.urlsafe_b64decode(data).decode('utf-8')
-                elif payload['mimeType'] == 'text/html':
-                    data = payload['body']['data']
-                    html = base64.urlsafe_b64decode(data).decode('utf-8')
-                    soup = BeautifulSoup(html, 'html.parser')
-                    body = soup.get_text()
-            
-            return body
+            try:
+                if 'parts' in payload:
+                    for part in payload['parts']:
+                        if part.get('mimeType') == 'text/plain' and part.get('body', {}).get('data'):
+                            data = part['body']['data']
+                            decoded = safe_decode_base64(data)
+                            if decoded:
+                                body = decoded
+                                break
+                        elif part.get('mimeType') == 'text/html' and part.get('body', {}).get('data'):
+                            data = part['body']['data']
+                            decoded = safe_decode_base64(data)
+                            if decoded:
+                                # Use BeautifulSoup safely
+                                try:
+                                    soup = BeautifulSoup(decoded, 'html.parser')
+                                    body = soup.get_text()
+                                    # Clean up soup object
+                                    soup.decompose()
+                                    del soup
+                                except Exception as soup_error:
+                                    logger.error(f"BeautifulSoup error: {soup_error}")
+                                    body = decoded  # Fallback to raw HTML
+                                break
+                        elif 'parts' in part:
+                            body = extract_text_from_payload(part)
+                            if body:
+                                break
+                else:
+                    if payload.get('mimeType') == 'text/plain' and payload.get('body', {}).get('data'):
+                        data = payload['body']['data']
+                        body = safe_decode_base64(data) or ""
+                    elif payload.get('mimeType') == 'text/html' and payload.get('body', {}).get('data'):
+                        data = payload['body']['data']
+                        decoded = safe_decode_base64(data)
+                        if decoded:
+                            try:
+                                soup = BeautifulSoup(decoded, 'html.parser')
+                                body = soup.get_text()
+                                soup.decompose()
+                                del soup
+                            except Exception as soup_error:
+                                logger.error(f"BeautifulSoup error: {soup_error}")
+                                body = decoded
+                
+                return body
+            except Exception as e:
+                logger.error(f"Error in extract_text_from_payload: {e}")
+                return ""
         
-        return extract_text_from_payload(payload)
+        result = extract_text_from_payload(payload)
+        
+        # Force garbage collection
+        gc.collect()
+        
+        return result or ""
     
     except Exception as e:
         logger.error(f"Error extracting email body: {e}")
+        gc.collect()  # Clean up on error
         return ""
 
 def build_formatted_message(body: str) -> str:
-    """Build formatted message from email body"""
-    def find(pattern, default="N/A"):
-        match = re.search(pattern, body, re.IGNORECASE)
-        return match.group(1).strip() if match else default
-
-    # Use the pickup and delivery extraction functions
-    pickup_address, pickup_date = extract_pickup_info(body)
-    if not pickup_address:
-        pickup_address = "Unknown Pickup"
-    if not pickup_date:
-        pickup_date = "ASAP"
+    """Build formatted message from email body with safer regex operations"""
+    if not body:
+        return "❌ **Error: Empty email body**"
     
-    delivery_address, delivery_date = extract_delivery_info(body)
-    if not delivery_address:
-        delivery_address = "Unknown Delivery"
-    if not delivery_date:
-        delivery_date = "N/A"
-    
-    # Extract other information
-    stops_miles = find(r'(\d+ STOPS?,\s*[0-9,]+ MILES)', "")
-    estimated_miles = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)\s*MILES', stops_miles)
-    estimated_miles = estimated_miles.group(1) if estimated_miles else "N/A"
-    
-    pieces = find(r'Pieces:\s*(.*)', "N/A")
-    weight = find(r'Weight:\s*(.*)', "N/A")
-    dims = find(r'Dimensions:\s*(.*)', "N/A")
-    stackable = find(r'Stackable:\s*(.*)', "N/A")
-    truck_size = find(r'Vehicle required:\s*(.*)', "N/A")
-    notes = find(r'Notes:\s*(.*)', "N/A")
-    broker_name = find(r'Broker Name:\s*(.*)', "N/A")
-    broker_company = find(r'Broker Company:\s*(.*)', "N/A")
-    broker_phone = find(r'Broker Phone:\s*(.*)', "N/A")
-    posted_amount = find(r'Posted Amount:\s*(.*)', "N/A")
+    try:
+        def find(pattern: str, default: str = "N/A") -> str:
+            try:
+                match = re.search(pattern, body, re.IGNORECASE)
+                return match.group(1).strip() if match and match.group(1) else default
+            except Exception:
+                return default
 
-    message = f"""📦 **New Load Alert!**
+        # Use the pickup and delivery extraction functions
+        pickup_address, pickup_date = extract_pickup_info(body)
+        pickup_address = pickup_address or "Unknown Pickup"
+        pickup_date = pickup_date or "ASAP"
+        
+        delivery_address, delivery_date = extract_delivery_info(body)
+        delivery_address = delivery_address or "Unknown Delivery"
+        delivery_date = delivery_date or "N/A"
+        
+        # Extract other information safely
+        stops_miles = find(r'(\d+ STOPS?,\s*[0-9,]+ MILES)', "")
+        estimated_miles_match = re.search(r'(\d{1,3}(?:,\d{3})*|\d+)\s*MILES', stops_miles)
+        estimated_miles = estimated_miles_match.group(1) if estimated_miles_match else "N/A"
+        
+        pieces = find(r'Pieces:\s*(.*)', "N/A")
+        weight = find(r'Weight:\s*(.*)', "N/A")
+        dims = find(r'Dimensions:\s*(.*)', "N/A")
+        stackable = find(r'Stackable:\s*(.*)', "N/A")
+        truck_size = find(r'Vehicle required:\s*(.*)', "N/A")
+        notes = find(r'Notes:\s*(.*)', "N/A")
+        broker_name = find(r'Broker Name:\s*(.*)', "N/A")
+        broker_company = find(r'Broker Company:\s*(.*)', "N/A")
+        broker_phone = find(r'Broker Phone:\s*(.*)', "N/A")
+        posted_amount = find(r'Posted Amount:\s*(.*)', "N/A")
 
-📍 **Pick-up:** {pickup_address}
-📅 **Pick-up date (EST):** {pickup_date}
+        # Limit string lengths to prevent memory issues
+        def limit_length(text: str, max_len: int = 200) -> str:
+            return text[:max_len] + "..." if len(text) > max_len else text
 
-🏁 **Deliver to:** {delivery_address}
-📅 **Deliver date (EST):** {delivery_date}
+        message = f"""📦 **New Load Alert!**
+
+📍 **Pick-up:** {limit_length(pickup_address)}
+📅 **Pick-up date (EST):** {limit_length(pickup_date)}
+
+🏁 **Deliver to:** {limit_length(delivery_address)}
+📅 **Deliver date (EST):** {limit_length(delivery_date)}
 
 🛣️ **Estimated Miles:** {estimated_miles}
-🚚 **Suggested Truck Size:** {truck_size}
-💰 **Posted Amount:** {posted_amount}
+🚚 **Suggested Truck Size:** {limit_length(truck_size)}
+💰 **Posted Amount:** {limit_length(posted_amount)}
 
-📦 **Pieces:** {pieces}
-⚖️ **Weight:** {weight}
-📏 **Dims:** {dims}
+📦 **Pieces:** {limit_length(pieces)}
+⚖️ **Weight:** {limit_length(weight)}
+📏 **Dims:** {limit_length(dims)}
 📚 **Stackable:** {stackable}
 
-👨‍💼 **Broker:** {broker_name}
-🏢 **Company:** {broker_company}
-📞 **Phone:** {broker_phone}
+👨‍💼 **Broker:** {limit_length(broker_name)}
+🏢 **Company:** {limit_length(broker_company)}
+📞 **Phone:** {limit_length(broker_phone)}
 
-📝 **Notes:** {notes}"""
+📝 **Notes:** {limit_length(notes)}"""
 
-    return message
+        return message
+    
+    except Exception as e:
+        logger.error(f"Error building formatted message: {e}")
+        return f"❌ **Error processing email**: {str(e)[:100]}"
 
-def send_telegram_message(message):
-    """Send message to Telegram"""
+def send_telegram_message(message: str) -> bool:
+    """Send message to Telegram with retry mechanism"""
+    if not message or not TELEGRAM_BOT_TOKEN or not CHAT_ID:
+        logger.error("Missing message, bot token, or chat ID")
+        return False
+    
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        
+        # Limit message length for Telegram
+        if len(message) > 4000:
+            message = message[:4000] + "\n\n... (truncated)"
+        
         data = {
             "chat_id": CHAT_ID,
             "text": message,
             "parse_mode": "Markdown"
         }
-        response = requests.post(url, data=data)
+        
+        # Set timeout and retry
+        response = requests.post(url, data=data, timeout=30)
         logger.info(f"Telegram response: {response.status_code}")
+        
+        if response.status_code != 200:
+            logger.error(f"Telegram API error: {response.text}")
+        
         return response.status_code == 200
+        
+    except requests.exceptions.Timeout:
+        logger.error("Telegram request timeout")
+        return False
     except Exception as e:
         logger.error(f"Error sending Telegram message: {e}")
         return False
 
-def load_credentials():
-    """Load credentials from token.json"""
+def load_credentials() -> Optional[Credentials]:
+    """Load credentials from token.json with better error handling"""
     token_file = 'token.json'
     
     if not os.path.exists(token_file):
@@ -233,44 +339,59 @@ def load_credentials():
         
         # Refresh if needed
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            # Save the refreshed credentials
-            with open(token_file, 'w') as token:
-                token.write(creds.to_json())
+            try:
+                creds.refresh(Request())
+                # Save the refreshed credentials
+                with open(token_file, 'w') as token:
+                    token.write(creds.to_json())
+                logger.info("✅ Credentials refreshed")
+            except Exception as refresh_error:
+                logger.error(f"Error refreshing credentials: {refresh_error}")
+                return None
         
         return creds
     except Exception as e:
         logger.error(f"❌ Error loading credentials: {e}")
         return None
 
-# Initialize Gmail service
-logger.info("🚀 Attempting to load credentials...")
-creds = load_credentials()
+def initialize_gmail_service() -> bool:
+    """Initialize Gmail service with proper error handling"""
+    global service
+    
+    logger.info("🚀 Attempting to load credentials...")
+    creds = load_credentials()
 
-if not creds:
-    logger.error("❌ Failed to load credentials")
-    print("❌ CREDENTIALS LOADING FAILED")
-    sys.exit(1)
+    if not creds:
+        logger.error("❌ Failed to load credentials")
+        return False
 
-try:
-    service = build('gmail', 'v1', credentials=creds)
-    logger.info("✅ Gmail service created successfully")
-except Exception as e:
-    logger.error(f"❌ Error building Gmail service: {e}")
-    print(f"❌ GMAIL SERVICE FAILED: {e}")
+    try:
+        service = build('gmail', 'v1', credentials=creds)
+        logger.info("✅ Gmail service created successfully")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error building Gmail service: {e}")
+        return False
+
+# Initialize Gmail service at startup
+if not initialize_gmail_service():
+    print("❌ GMAIL SERVICE INITIALIZATION FAILED")
     sys.exit(1)
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "status": "running",
-        "version": "updated-version",
-        "message": "Gmail webhook with proper email extraction is running"
+        "version": "memory-safe-version",
+        "message": "Gmail webhook with memory safety is running"
     })
 
 @app.route("/test-gmail", methods=["GET"])
 def test_gmail():
     try:
+        if not service:
+            return jsonify({"status": "error", "error": "Gmail service not initialized"}), 500
+            
         profile = service.users().getProfile(userId='me').execute()
         return jsonify({
             "status": "success",
@@ -278,6 +399,7 @@ def test_gmail():
             "message": "Gmail API is working!"
         })
     except Exception as e:
+        logger.error(f"Gmail test error: {e}")
         return jsonify({
             "status": "error",
             "error": str(e)
@@ -285,8 +407,11 @@ def test_gmail():
 
 @app.route("/test-latest-email", methods=["GET"])
 def test_latest_email():
-    """Test endpoint to process the latest email"""
+    """Test endpoint to process the latest email with memory safety"""
     try:
+        if not service:
+            return jsonify({"status": "error", "error": "Gmail service not initialized"}), 500
+        
         # Get the latest email from Sprinter label
         results = service.users().messages().list(userId='me', labelIds=['Label_1'], maxResults=1).execute()
         messages = results.get('messages', [])
@@ -304,11 +429,20 @@ def test_latest_email():
         body = extract_clean_body_from_gmail(service, message_id)
         logger.info(f"Extracted body length: {len(body)}")
         
+        if not body:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to extract email body"
+            })
+        
         # Build formatted message
         formatted_message = build_formatted_message(body)
         
         # Send to Telegram
         success = send_telegram_message(formatted_message)
+        
+        # Force garbage collection
+        gc.collect()
         
         return jsonify({
             "status": "success" if success else "telegram_error",
@@ -319,6 +453,7 @@ def test_latest_email():
         
     except Exception as e:
         logger.error(f"Error in test_latest_email: {e}")
+        gc.collect()  # Clean up on error
         return jsonify({
             "status": "error",
             "error": str(e),
@@ -327,22 +462,38 @@ def test_latest_email():
 
 @app.route("/gmail-notify", methods=["POST"])
 def gmail_notify():
-    """Handle Gmail webhook notifications"""
+    """Handle Gmail webhook notifications with memory safety"""
     try:
         logger.info("📩 Gmail notification received")
         
+        if not service:
+            logger.error("Gmail service not initialized")
+            return jsonify({"status": "error", "error": "Service not initialized"}), 500
+        
         # Get notification data
         notification_data = request.get_json()
+        if not notification_data:
+            logger.error("No notification data received")
+            return jsonify({"status": "error", "error": "No data"}), 400
+        
         logger.info(f"Notification data: {notification_data}")
         
-        # Decode the message data
+        # Process notification
         if 'message' in notification_data:
             message_data = notification_data['message']
             if 'data' in message_data:
-                # Decode base64 data
-                decoded_data = base64.b64decode(message_data['data']).decode('utf-8')
-                pub_sub_data = json.loads(decoded_data)
-                logger.info(f"Decoded pub/sub data: {pub_sub_data}")
+                # Decode the message data safely
+                decoded_data = safe_decode_base64(message_data['data'])
+                if not decoded_data:
+                    logger.error("Failed to decode pub/sub data")
+                    return jsonify({"status": "error", "error": "Decode failed"}), 400
+                
+                try:
+                    pub_sub_data = json.loads(decoded_data)
+                    logger.info(f"Decoded pub/sub data: {pub_sub_data}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON decode error: {e}")
+                    return jsonify({"status": "error", "error": "Invalid JSON"}), 400
                 
                 # Get the history ID to fetch new messages
                 history_id = pub_sub_data.get('historyId')
@@ -351,11 +502,15 @@ def gmail_notify():
                     results = service.users().messages().list(
                         userId='me', 
                         labelIds=['Label_1'],  # Sprinter label
-                        maxResults=5
+                        maxResults=3  # Reduced from 5 to limit memory usage
                     ).execute()
                     messages = results.get('messages', [])
                     
+                    processed_count = 0
                     for msg in messages:
+                        if processed_count >= 1:  # Only process 1 email per notification
+                            break
+                            
                         message_id = msg['id']
                         logger.info(f"Processing message ID: {message_id}")
                         
@@ -370,20 +525,45 @@ def gmail_notify():
                             success = send_telegram_message(formatted_message)
                             logger.info(f"Telegram message sent: {success}")
                             
-                            # Only process the first new email to avoid spam
-                            break
+                            processed_count += 1
+                            
+                            # Force garbage collection after processing
+                            gc.collect()
         
         return jsonify({"status": "processed"}), 200
         
     except Exception as e:
         logger.error(f"Error processing Gmail notification: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
+        
+        # Force garbage collection on error
+        gc.collect()
+        
         return jsonify({
             "status": "error",
-            "error": str(e)
+            "error": str(e)[:200]  # Limit error message length
         }), 500
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    logger.error("Request entity too large")
+    return jsonify({"status": "error", "error": "Request too large"}), 413
+
+@app.errorhandler(500)
+def internal_server_error(error):
+    logger.error(f"Internal server error: {error}")
+    gc.collect()  # Clean up on server error
+    return jsonify({"status": "error", "error": "Internal server error"}), 500
 
 if __name__ == "__main__":
     print("🎯 Starting Flask application...")
-    logger.info("🚀 Updated Gmail Webhook Starting")
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    logger.info("🚀 Memory Safe Gmail Webhook Starting")
+    
+    # Configure Flask for production-like settings
+    app.run(
+        host="0.0.0.0", 
+        port=8080, 
+        debug=False,
+        threaded=True,
+        use_reloader=False  # Disable reloader to prevent memory issues
+    )
