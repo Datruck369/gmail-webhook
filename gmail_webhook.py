@@ -27,6 +27,19 @@ class TLSHttpAdapter(HTTPAdapter):
         kwargs['ssl_context'] = context
         return super().init_poolmanager(*args, **kwargs)
 
+def safe_decode_base64(data: str) -> Optional[str]:
+    try:
+        if not data:
+            return None
+        missing_padding = len(data) % 4
+        if missing_padding:
+            data += '=' * (4 - missing_padding)
+        decoded = base64.urlsafe_b64decode(data)
+        return decoded.decode('utf-8', errors='ignore')
+    except Exception as e:
+        logger.error(f"Error decoding base64: {e}")
+        return None
+
 print("="*50)
 print("🚀 GMAIL WEBHOOK - MEMORY SAFE VERSION")
 print("="*50)
