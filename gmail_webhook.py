@@ -9,6 +9,8 @@ import json
 import logging
 import re
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.ssl_ import create_urllib3_context
 from flask import Flask, request, jsonify
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -17,6 +19,13 @@ from bs4 import BeautifulSoup
 import base64
 import gc
 from typing import Optional, Tuple
+
+class TLSHttpAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        context = create_urllib3_context()
+        context.set_ciphers("DEFAULT@SECLEVEL=1")
+        kwargs['ssl_context'] = context
+        return super().init_poolmanager(*args, **kwargs)
 
 print("="*50)
 print("🚀 GMAIL WEBHOOK - MEMORY SAFE VERSION")
@@ -30,7 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB limit
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8197352509:AAFtUTiOgLq_oDIcPdlT_ud9lcBJFwFjJ20')
@@ -41,33 +50,28 @@ print(f"💬 Chat ID configured: {'YES' if CHAT_ID else 'NO'}")
 
 service = None
 
-def safe_decode_base64(data: str) -> Optional[str]:
-    try:
-        if not data:
-            return None
-        missing_padding = len(data) % 4
-        if missing_padding:
-            data += '=' * (4 - missing_padding)
-        decoded = base64.urlsafe_b64decode(data)
-        return decoded.decode('utf-8', errors='ignore')
-    except Exception as e:
-        logger.error(f"Error decoding base64: {e}")
-        return None
+# ... (rest of the code remains the same until send_telegram_message)
 
-def extract_pickup_info(body: str) -> Tuple[Optional[str], Optional[str]]:
-    if not body:
-        return None, None
-    try:
-        body = body.replace('\r\n', '\n').replace('\r', '\n')
-        pattern = r'(?i)Pick[- ]?Up\s*\n+([^\n]+)\n+([^\n]+)'
-        match = re.search(pattern, body)
-        if match:
-            return match.group(1).strip(), match.group(2).strip()
-        return None, None
-    except Exception as e:
-        logger.error(f"Pickup extraction error: {e}")
-        return None, None
+def send_telegram_message(message: str) -> bool:
+    if not TELEGRAM_BOT_TOKEN or not CHAT_ID or not message:
+        logger.error("Missing bot token, chat ID, or message")
+        return False
 
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+
+        session = requests.Session()
+        session.mount("https://", TLSHttpAdapter())
+
+        response = session.post(url, data=data, timeout=30)
+        logger.info(f"Telegram status: {response.status_code}")
+        return response.status_code == 200
+
+    except Exception as e:
+        logger.error(f"Telegram error: {e}")
+        return False
+        
 def extract_delivery_info(body: str) -> Tuple[Optional[str], Optional[str]]:
     if not body:
         return None, None
