@@ -9,8 +9,6 @@ import json
 import logging
 import re
 import requests
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.ssl_ import create_urllib3_context
 from flask import Flask, request, jsonify
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -19,13 +17,6 @@ from bs4 import BeautifulSoup
 import base64
 import gc
 from typing import Optional, Tuple
-
-class TLSHttpAdapter(HTTPAdapter):
-    def init_poolmanager(self, *args, **kwargs):
-        context = create_urllib3_context()
-        context.set_ciphers("DEFAULT@SECLEVEL=1")
-        kwargs['ssl_context'] = context
-        return super().init_poolmanager(*args, **kwargs)
 
 def safe_decode_base64(data: str) -> Optional[str]:
     try:
@@ -68,6 +59,19 @@ service = None
 def send_telegram_message(message: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not CHAT_ID or not message:
         logger.error("Missing bot token, chat ID, or message")
+        return False
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+
+        # Use direct post without custom TLS adapter
+        response = requests.post(url, data=data, timeout=30)
+        logger.info(f"Telegram status: {response.status_code}")
+        return response.status_code == 200
+
+    except Exception as e:
+        logger.error(f"Telegram error: {e}")
         return False
 
     try:
